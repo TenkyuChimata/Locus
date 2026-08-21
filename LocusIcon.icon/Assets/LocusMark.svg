@@ -1,13 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1024"
+  height="1024"
+  viewBox="0 0 1024 1024"
+>
   <g fill="none" stroke="#FFFFFF" stroke-linecap="round" stroke-linejoin="round">
-    <circle cx="128" cy="128" r="101" stroke-width="18" opacity="0.32"/>
+    <circle cx="512" cy="512" r="298" stroke-width="40" opacity="0.32"/>
     <path
-      d="M128 17V52 M128 204V239 M17 128H52 M204 128H239"
-      stroke-width="22"
+      d="M512 196V252 M512 772V828 M196 512H252 M772 512H828"
+      stroke-width="48"
     />
-    <circle cx="128" cy="128" r="65" stroke-width="22"/>
+    <circle cx="512" cy="512" r="224" stroke-width="72"/>
   </g>
-  <circle cx="128" cy="128" r="34" fill="#FFFFFF"/>
-  <circle cx="128" cy="128" r="13" fill="#35E2D3"/>
+  <circle cx="512" cy="512" r="120" fill="#FFFFFF"/>
+  <circle cx="512" cy="512" r="46" fill="#35E2D3"/>
 </svg>
