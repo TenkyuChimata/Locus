@@ -23,7 +23,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// A concise comparison between the direct backing plist and the effective
 /// MAECopyDeviceRegionInfoWithError result. This method is read-only.
-- (NSDictionary<NSString *, id> *)regionDiagnosticsWithError:(NSError **)error
+- (NSDictionary<NSString *, id> *)regionDiagnostics
     NS_SWIFT_NAME(regionDiagnostics());
 
 @end

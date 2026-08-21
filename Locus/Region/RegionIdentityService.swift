@@ -43,7 +43,7 @@ final class RegionIdentityService: ObservableObject {
                 throw JapanRegionError.invalidMobileGestalt
             }
             let cacheExtra = plist["CacheExtra"] as? [String: Any] ?? [:]
-            let activationDiagnostics = (try? activation.regionDiagnostics()) ?? [:]
+            let activationDiagnostics = activation.regionDiagnostics()
             let exactBuild = build == JapanRegionMutation.verifiedBuild
             var ready = false
             var readiness = "Ready for verified transaction"

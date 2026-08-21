@@ -60,12 +60,7 @@ final class RuntimeDiagnosticsService: ObservableObject {
 
         // Preserve the existing first-touch ordering: collect the direct MAE
         // result before asking MobileGestalt for activation-derived answers.
-        do {
-            activation = try activationAccess.regionDiagnostics()
-        } catch {
-            activation = [:]
-            errors.append("MobileActivation: \(error.localizedDescription)")
-        }
+        activation = activationAccess.regionDiagnostics()
 
         do {
             chosenProperties = try deviceTree.chosenProperties(

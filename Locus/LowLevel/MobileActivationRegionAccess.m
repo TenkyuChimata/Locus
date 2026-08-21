@@ -593,7 +593,7 @@ static NSDictionary * _Nullable LocusParsePlistData(
     }
 }
 
-- (NSDictionary<NSString *, id> *)regionDiagnosticsWithError:(NSError **)error
+- (NSDictionary<NSString *, id> *)regionDiagnostics
 {
     NSMutableDictionary<NSString *, id> *result = [NSMutableDictionary dictionary];
 
@@ -657,9 +657,6 @@ static NSDictionary * _Nullable LocusParsePlistData(
     if (!handle) {
         result[@"effectiveErrorDescription"] = [NSString stringWithFormat:
             @"Could not load MobileActivation: %s", dlerror() ?: "unknown error"];
-        if (error) {
-            *error = nil;
-        }
         return [result copy];
     }
 
@@ -676,9 +673,6 @@ static NSDictionary * _Nullable LocusParsePlistData(
         result[@"effectiveErrorDescription"] =
             @"Required MobileActivation device-region symbols are unavailable.";
         dlclose(handle);
-        if (error) {
-            *error = nil;
-        }
         return [result copy];
     }
 
@@ -706,9 +700,6 @@ static NSDictionary * _Nullable LocusParsePlistData(
     // match the verified implementation and do not release apiErrorRef.
     dlclose(handle);
 
-    if (error) {
-        *error = nil;
-    }
     return [result copy];
 }
 
