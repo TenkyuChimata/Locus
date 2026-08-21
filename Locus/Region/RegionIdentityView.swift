@@ -102,22 +102,21 @@ struct RegionIdentityView: View {
         Section("Mutation Capability") {
             statusRow(
                 "Exact Build Path",
-                isGood: service.snapshot?.exactBuildSupported == true,
-                good: "Supported",
-                bad: "Unsupported"
+                text: service.snapshot?.exactBuildSupported == true ? "Supported" : "Unsupported",
+                systemImage: service.snapshot?.exactBuildSupported == true
+                    ? "checkmark.circle.fill"
+                    : "xmark.circle.fill",
+                color: service.snapshot?.exactBuildSupported == true ? .green : .orange
             )
             statusRow(
                 "Verified Profile",
-                isGood: service.snapshot?.profile != nil,
-                good: "Found",
-                bad: "Unavailable"
+                text: service.snapshot?.profile != nil ? "Found" : "Unavailable",
+                systemImage: service.snapshot?.profile != nil
+                    ? "checkmark.circle.fill"
+                    : "xmark.circle.fill",
+                color: service.snapshot?.profile != nil ? .green : .orange
             )
-            statusRow(
-                "Already Configured",
-                isGood: service.snapshot?.configured == true,
-                good: "Yes",
-                bad: "No"
-            )
+            configurationStatusRow(service.snapshot?.configurationState)
 
             if let detail = service.snapshot?.readinessDetail,
                service.snapshot?.mutationPathReady != true {
@@ -140,14 +139,38 @@ struct RegionIdentityView: View {
 
     private func statusRow(
         _ title: String,
-        isGood: Bool,
-        good: String,
-        bad: String
+        text: String,
+        systemImage: String,
+        color: Color
     ) -> some View {
-        LabeledContent(title) {
-            Label(isGood ? good : bad, systemImage: isGood ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundStyle(isGood ? .green : .orange)
+        HStack(spacing: 12) {
+            Text(title)
+            Spacer(minLength: 12)
+            Label(text, systemImage: systemImage)
+                .foregroundStyle(color)
                 .font(.caption.weight(.semibold))
+                .multilineTextAlignment(.trailing)
         }
+        .padding(.vertical, 2)
+    }
+
+    private func configurationStatusRow(_ state: RegionConfigurationState?) -> some View {
+        let presentation: (text: String, systemImage: String, color: Color)
+        switch state {
+        case .verified:
+            presentation = ("Verified", "checkmark.circle.fill", .green)
+        case .japanLikeUnverified:
+            presentation = ("Detected · Unverified", "exclamationmark.triangle.fill", .orange)
+        case .notApplied:
+            presentation = ("Not Applied", "xmark.circle.fill", .orange)
+        case .unavailable, nil:
+            presentation = ("Unavailable", "questionmark.circle.fill", .orange)
+        }
+        return statusRow(
+            "Configuration State",
+            text: presentation.text,
+            systemImage: presentation.systemImage,
+            color: presentation.color
+        )
     }
 }

@@ -1,6 +1,13 @@
 import Combine
 import Foundation
 
+enum RegionConfigurationState: Equatable, Sendable {
+    case verified
+    case japanLikeUnverified
+    case notApplied
+    case unavailable
+}
+
 struct RegionIdentitySnapshot {
     let build: String
     let productType: String
@@ -13,7 +20,7 @@ struct RegionIdentitySnapshot {
     let activationBehaviors: String
     let exactBuildSupported: Bool
     let mutationPathReady: Bool
-    let configured: Bool
+    let configurationState: RegionConfigurationState
     let readinessDetail: String
 }
 
@@ -42,9 +49,16 @@ final class RegionIdentityService: ObservableObject {
             guard let plist = try gestalt.readCachePlist() as? [String: Any] else {
                 throw JapanRegionError.invalidMobileGestalt
             }
-            let cacheExtra = plist["CacheExtra"] as? [String: Any] ?? [:]
+            let cacheExtra = plist["CacheExtra"] as? [String: Any]
             let activationDiagnostics = activation.regionDiagnostics()
             let exactBuild = build == JapanRegionMutation.verifiedBuild
+            let configurationState = classifyConfiguration(
+                plist: plist,
+                cacheExtra: cacheExtra,
+                activationDiagnostics: activationDiagnostics,
+                profile: profile,
+                build: build
+            )
             var ready = false
             var readiness = "Ready for verified transaction"
 
@@ -65,27 +79,29 @@ final class RegionIdentityService: ObservableObject {
                     readiness = error.localizedDescription
                 }
             } else {
-                readiness = JapanRegionError
-                    .unsupportedProductType(productType)
-                    .localizedDescription
+                if configurationState == .japanLikeUnverified {
+                    readiness = "Existing Japan-like persistent identity detected, but no verified "
+                        + "Japan profile exists for \(productType). Locus will not modify this device."
+                } else {
+                    readiness = JapanRegionError
+                        .unsupportedProductType(productType)
+                        .localizedDescription
+                }
             }
 
             snapshot = RegionIdentitySnapshot(
                 build: build,
                 productType: productType,
                 profile: profile,
-                regionCode: display(cacheExtra[JapanRegionMutation.regionCodeKey]),
-                regionInfo: display(cacheExtra[JapanRegionMutation.regionInfoKey]),
-                regulatoryModel: display(cacheExtra[JapanRegionMutation.regulatoryModelKey]),
+                regionCode: display(cacheExtra?[JapanRegionMutation.regionCodeKey]),
+                regionInfo: display(cacheExtra?[JapanRegionMutation.regionInfoKey]),
+                regulatoryModel: display(cacheExtra?[JapanRegionMutation.regulatoryModelKey]),
                 activationCountry: display(activationDiagnostics["backingCountryCode"]),
                 activationRegion: display(activationDiagnostics["backingRegionInfo"]),
                 activationBehaviors: display(activationDiagnostics["backingSoftwareBehaviors"]),
                 exactBuildSupported: exactBuild,
                 mutationPathReady: ready,
-                configured: profile.map {
-                    JapanRegionMutation.isApplied(to: plist, profile: $0, build: build)
-                        && activationIsJapan(activationDiagnostics)
-                } ?? false,
+                configurationState: configurationState,
                 readinessDetail: readiness
             )
         } catch {
@@ -101,7 +117,7 @@ final class RegionIdentityService: ObservableObject {
                 activationBehaviors: "<unavailable>",
                 exactBuildSupported: build == JapanRegionMutation.verifiedBuild,
                 mutationPathReady: false,
-                configured: false,
+                configurationState: .unavailable,
                 readinessDetail: error.localizedDescription
             )
             errorMessage = error.localizedDescription
@@ -251,15 +267,49 @@ final class RegionIdentityService: ObservableObject {
         return nil
     }
 
+    private func classifyConfiguration(
+        plist: [String: Any],
+        cacheExtra: [String: Any]?,
+        activationDiagnostics: [String: Any],
+        profile: JapanRegionProfile?,
+        build: String
+    ) -> RegionConfigurationState {
+        guard let cacheExtra,
+              (activationDiagnostics["backingReadSucceeded"] as? NSNumber)?.boolValue == true else {
+            return .unavailable
+        }
+
+        let activationMatches = activationIsJapan(activationDiagnostics)
+        if let profile {
+            return JapanRegionMutation.isApplied(
+                to: plist,
+                profile: profile,
+                build: build
+            ) && activationMatches ? .verified : .notApplied
+        }
+
+        let mobileGestaltMatches = cacheExtra[JapanRegionMutation.regionCodeKey] as? String == "J"
+            && cacheExtra[JapanRegionMutation.regionInfoKey] as? String == "J/A"
+        return mobileGestaltMatches && activationMatches
+            ? .japanLikeUnverified
+            : .notApplied
+    }
+
     private func activationIsJapan(_ diagnostics: [String: Any]) -> Bool {
-        display(diagnostics["backingCountryCode"]) == "JP"
-            && display(diagnostics["backingRegionInfo"]) == "J/A"
+        diagnostics["backingCountryCode"] as? String == "JP"
+            && diagnostics["backingRegionInfo"] as? String == "J/A"
             && parseDisplayBehavior(diagnostics["backingSoftwareBehaviors"]) == 0x19
     }
 
     private func parseDisplayBehavior(_ value: Any?) -> UInt32? {
         if let number = value as? NSNumber { return number.uint32Value }
-        if let string = value as? String { return UInt32(string, radix: 10) }
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.lowercased().hasPrefix("0x") {
+                return UInt32(trimmed.dropFirst(2), radix: 16)
+            }
+            return UInt32(trimmed, radix: 10)
+        }
         return nil
     }
 
