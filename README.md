@@ -125,8 +125,9 @@ xcodebuild \
 ```
 
 The GitHub Actions workflow runs portable regressions, macOS native regressions,
-and generic unsigned Debug/Release device builds in independent jobs. A failed
-test does not prevent either build from reporting its result and keeps CI red.
+iPhoneOS arm64 native syntax checks, and generic unsigned Debug/Release device
+builds in independent jobs. A failed test does not prevent either build from
+reporting its result and keeps CI red.
 Only after all jobs succeed does the packaging job rebuild unsigned Release,
 place `Locus.app` under `Payload`, and upload `Locus-unsigned.ipa`.
 
@@ -163,6 +164,7 @@ automation or backup UI was imported.
 sh Scripts/test-portable.sh  # C sanitizer/Python checks; also Swift when available
 sh Scripts/test-swift.sh     # actual pure Swift planner/scanner/coordinator/service
 sh Scripts/test-macos.sh     # macOS Objective-C/Mach-O bridge and Swift regressions
+sh Scripts/check-ios-native.sh # actual iPhoneOS arm64 SDK syntax checks; requires Xcode
 ```
 
 The Swift suite runs the actual planners, scanner and journal engine with synthetic

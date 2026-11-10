@@ -17,11 +17,12 @@ JOBS = dict(re.findall(
 
 class WorkflowPolicyTests(unittest.TestCase):
     def test_builds_and_native_tests_are_independent(self):
-        for job in ("portable-tests", "native-tests", "build"):
+        for job in ("portable-tests", "native-tests", "ios-sdk-checks", "build"):
             self.assertIn(job, JOBS)
             self.assertNotRegex(JOBS[job], r"(?m)^    (?:needs|if):")
         self.assertIn("sh Scripts/test-macos.sh", JOBS["native-tests"])
         self.assertIn("sh Scripts/test-portable.sh", JOBS["native-tests"])
+        self.assertIn("sh Scripts/check-ios-native.sh", JOBS["ios-sdk-checks"])
         self.assertNotIn("test-macos.sh", JOBS["build"])
         self.assertIn("xcodebuild", JOBS["build"])
         self.assertIn("configuration: [Debug, Release]", JOBS["build"])
@@ -32,7 +33,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         needs = re.search(r"(?m)^    needs: \[([^\]]+)\]$", package)
         self.assertIsNotNone(needs)
         required = {name.strip() for name in needs[1].split(",")}
-        self.assertEqual(required, {"portable-tests", "native-tests", "build"})
+        self.assertEqual(required, {"portable-tests", "native-tests", "ios-sdk-checks", "build"})
         condition = re.search(r"(?m)^    if: >-\n((?:      .*\n)+)", package)
         self.assertIsNotNone(condition)
         expression = condition[1].strip()
@@ -46,10 +47,10 @@ class WorkflowPolicyTests(unittest.TestCase):
             guards[match[1]] = "success"
         self.assertEqual(set(guards), required)
         names = sorted(required)
-        for outcomes in itertools.product(("success", "failure", "cancelled", "skipped"), repeat=3):
+        for outcomes in itertools.product(("success", "failure", "cancelled", "skipped"), repeat=len(names)):
             status = dict(zip(names, outcomes))
             admitted = all(status[name] == value for name, value in guards.items())
-            self.assertEqual(admitted, outcomes == ("success",) * 3, status)
+            self.assertEqual(admitted, outcomes == ("success",) * len(names), status)
 
     def test_only_validated_package_job_exposes_an_artifact(self):
         uploaders = {name for name, body in JOBS.items() if "uses: actions/upload-artifact@" in body}
@@ -67,6 +68,19 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("set -eu", native)
         self.assertIn("-Werror", native)
         self.assertNotIn("|| true", native)
+
+    def test_sdk_check_uses_device_headers_and_compile_only_flags(self):
+        script = (ROOT / "Scripts/check-ios-native.sh").read_text()
+        self.assertIn("set -eu", script)
+        self.assertIn("xcrun --sdk iphoneos --show-sdk-path", script)
+        self.assertIn('-target arm64-apple-ios26.0 -isysroot "$sdk" -fsyntax-only', script)
+        self.assertIn("-Werror", script)
+        self.assertIn("-fobjc-arc -fblocks -fmodules", script)
+        self.assertIn("Locus/LowLevel/*.c", script)
+        self.assertIn("Locus/LowLevel/*.m Locus/CoreText/*.m Locus/Locus-Bridging-Header.h", script)
+        commands = "\n".join(line for line in script.splitlines() if not line.startswith("#"))
+        self.assertNotIn("-framework", commands)
+        self.assertNotIn("|| true", commands)
 
 
 if __name__ == "__main__":

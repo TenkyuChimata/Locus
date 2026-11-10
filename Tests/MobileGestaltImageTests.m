@@ -2,21 +2,78 @@
 // Synthetic loaded Mach-O; actual checked Mach VM reads in this process only.
 #import <Foundation/Foundation.h>
 #import <mach-o/dyld.h>
+#import <mach/mach.h>
 #import <assert.h>
 #import <string.h>
+#import <sys/mman.h>
+#import <unistd.h>
 static uint32_t TestCount(void);
 static const char *TestName(uint32_t);
 static const struct mach_header *TestHeader(uint32_t);
 static intptr_t TestSlide(uint32_t);
+static kern_return_t TestReadOverwrite(vm_map_read_t, vm_address_t, vm_size_t, vm_address_t, vm_size_t *);
 #define _dyld_image_count TestCount
 #define _dyld_get_image_name TestName
 #define _dyld_get_image_header TestHeader
 #define _dyld_get_image_vmaddr_slide TestSlide
+#define vm_read_overwrite TestReadOverwrite
 #import "../Locus/LowLevel/MobileGestaltImage.m"
 #undef _dyld_image_count
 #undef _dyld_get_image_name
 #undef _dyld_get_image_header
 #undef _dyld_get_image_vmaddr_slide
+#undef vm_read_overwrite
+
+typedef NS_ENUM(NSUInteger, ReadFault) { ReadFaultNone, ReadFaultStatus, ReadFaultShort, ReadFaultOversized };
+static ReadFault readFault;
+static NSUInteger readCalls;
+static kern_return_t TestReadOverwrite(vm_map_read_t task, vm_address_t address, vm_size_t size,
+                                      vm_address_t destination, vm_size_t *copied)
+{
+    readCalls++;
+    assert(task == mach_task_self() && copied);
+    switch (readFault) {
+        case ReadFaultStatus: *copied = size; return KERN_FAILURE;
+        case ReadFaultShort: *copied = size - 1; return KERN_SUCCESS;
+        case ReadFaultOversized: *copied = size + 1; return KERN_SUCCESS;
+        case ReadFaultNone: return vm_read_overwrite(task, address, size, destination, copied);
+    }
+    assert(0 && "Unknown VM read fault");
+    return KERN_FAILURE;
+}
+
+static void CheckMemoryReads(void)
+{
+    const char sample[] = "checked VM read";
+    uint64_t address = (uint64_t)(uintptr_t)sample;
+    NSData *copy = LocusReadMemory(address, sizeof(sample));
+    assert(copy.length == sizeof(sample) && !memcmp(copy.bytes, sample, sizeof(sample)));
+    NSUInteger before = readCalls;
+    assert(!LocusReadMemory(0, 1));
+    assert(!LocusReadMemory(address, 0));
+    assert(!LocusReadMemory(address, 32 * 1024 * 1024 + 1));
+    assert(!LocusReadMemory(UINT64_MAX, 1));
+    assert(!LocusReadMemory(UINT64_MAX - 3, 8));
+    assert(readCalls == before); // Invalid ranges must not reach Mach.
+    size_t pageSize = (size_t)getpagesize();
+    void *unreadable = mmap(NULL, pageSize, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    assert(unreadable != MAP_FAILED);
+    assert(!LocusReadMemory((uint64_t)(uintptr_t)unreadable, 1));
+    assert(munmap(unreadable, pageSize) == 0);
+    for (ReadFault fault = ReadFaultStatus; fault <= ReadFaultOversized; fault++) {
+        readFault = fault;
+        before = readCalls;
+        assert(!LocusReadMemory(address, sizeof(sample)));
+        assert(readCalls == before + 1);
+    }
+    readFault = ReadFaultStatus;
+    before = readCalls;
+    assert(!LocusReadMemory(address, 32 * 1024 * 1024));
+    assert(readCalls == before + 1); // The existing inclusive limit is retained.
+    readFault = ReadFaultNone;
+    copy = LocusReadMemory(address, sizeof(sample));
+    assert(copy.length == sizeof(sample) && !memcmp(copy.bytes, sample, sizeof(sample)));
+}
 
 struct FixtureImage {
     struct mach_header_64 header;
@@ -67,6 +124,7 @@ static NSDictionary *Snapshot(void) { return LocusSnapshotImage(@"/usr/lib/libMo
 int main(void)
 {
     @autoreleasepool {
+        CheckMemoryReads();
         for (int sign = -1; sign <= 1; sign++) {
             Reset(sign * 0x100000);
             NSDictionary *value = Snapshot();
@@ -76,6 +134,13 @@ int main(void)
         Reset(0); fixture.header.ncmds++; assert(Snapshot()[@"error"]);
         Reset(0); fixture.uuid.cmdsize = 0; assert(Snapshot()[@"error"]);
         Reset(0); fixture.uuid.cmd = LC_LOAD_DYLIB; assert(Snapshot()[@"error"]);
+        Reset(0);
+        fixture.header.ncmds = 2;
+        fixture.header.sizeofcmds = 2 * sizeof(struct uuid_command);
+        struct uuid_command duplicate = fixture.uuid;
+        duplicate.uuid[0] = 2;
+        memcpy(&fixture.text, &duplicate, sizeof(duplicate));
+        assert([Snapshot()[@"error"] hasPrefix:@"Missing/duplicate LC_UUID"]);
         Reset(0); fixture.text.nsects = UINT32_MAX; assert(Snapshot()[@"error"]);
         Reset(0); fixture.strings.addr--; assert(Snapshot()[@"error"]);
         Reset(0); fixture.strings.size++; assert(Snapshot()[@"error"]);
@@ -86,6 +151,6 @@ int main(void)
         assert(Snapshot()[@"error"]);
         Reset(0); imageCount = 2; assert(Snapshot()[@"error"]);
         Reset(0); imageCount = 0; assert(Snapshot()[@"error"]);
-        puts("PASS: loaded-image section/segment/command bounds, safe read failure, identity ambiguity and signed ASLR slides (synthetic Mach-O)");
+        puts("PASS: checked VM reads, status/byte-count/range rejection, loaded-image bounds, UUID conflicts, unreadable pages and signed ASLR slides (synthetic Mach-O)");
     }
 }

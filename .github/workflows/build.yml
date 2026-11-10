@@ -30,6 +30,18 @@ jobs:
       - name: Host regressions (simulated APIs, temporary files)
         run: sh Scripts/test-macos.sh
 
+  ios-sdk-checks:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Show device SDK toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphoneos clang --version
+      - name: Check native sources against iPhoneOS arm64 SDK
+        run: sh Scripts/check-ios-native.sh
+
   build:
     # Compilation is independent of host tests so both report failures.
     runs-on: macos-latest
@@ -64,10 +76,11 @@ jobs:
   package:
     # Never expose an IPA or upload an unvalidated intermediate app. Rebuild
     # Release for packaging only after both configurations and all tests pass.
-    needs: [portable-tests, native-tests, build]
+    needs: [portable-tests, native-tests, ios-sdk-checks, build]
     if: >-
       ${{ needs.portable-tests.result == 'success' &&
           needs.native-tests.result == 'success' &&
+          needs.ios-sdk-checks.result == 'success' &&
           needs.build.result == 'success' }}
     runs-on: macos-latest
     steps:
