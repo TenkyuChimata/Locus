@@ -97,6 +97,11 @@ int main(void)
     assert(symlink(path, link) == 0 && symlink(root, dirlink) == 0);
     r = observe(link, 0); assert(r.error && !r.stable); LocusFreeEvidenceFile(&r);
     r = observe(nested, 0); assert(r.error && !r.stable); LocusFreeEvidenceFile(&r);
+    // Canonicalize only the created test fixture, never a production input.
+    char *canonical = realpath(nested, NULL);
+    assert(canonical);
+    r = observe(canonical, 0); assert(r.stable && r.error == 0); LocusFreeEvidenceFile(&r);
+    free(canonical);
     r = observe(root, 0); assert(r.error == EINVAL); LocusFreeEvidenceFile(&r);
     r = observe("relative", 0); assert(r.error == EINVAL); LocusFreeEvidenceFile(&r);
     int fd = open(path, O_WRONLY | O_TRUNC);

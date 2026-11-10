@@ -19,6 +19,20 @@ enum MobileGestaltEvidenceCollector {
     static let tableOffset = 0x830, tableCount = 2323, recordSize = 64
     static let fileName = "Locus-MobileGestalt-RuntimeEvidence-24B119.json"
     static let null = NSNull()
+    static let metadataKeys = ["device", "inode", "size", "mode", "uid", "gid", "links", "mtimeSeconds", "mtimeNanoseconds", "ctimeSeconds", "ctimeNanoseconds"]
+
+    static func equalFileMetadata(_ lhs: [String: Any], _ rhs: [String: Any]) -> Bool {
+        guard lhs.count == rhs.count,
+              metadataKeys.allSatisfy({ lhs[$0] is NSNumber && rhs[$0] is NSNumber }) else { return false }
+        // Compare every field, including future numeric additions. On Linux,
+        // NSDictionary.isEqual(to:) can report identical native Swift metadata
+        // dictionaries as unequal. Do not discard fields or narrow stat values
+        // to Double/Int in order to work around that bridge.
+        return lhs.allSatisfy { key, value in
+            guard let left = value as? NSNumber, let right = rhs[key] as? NSNumber else { return false }
+            return left.compare(right) == .orderedSame
+        }
+    }
 
     static func json<T>(_ value: T?) -> Any { value.map { $0 as Any } ?? null }
 
@@ -224,10 +238,9 @@ enum MobileGestaltEvidenceCollector {
         let first = file["first"] as? Data, second = file["second"] as? Data
         let firstHash = first.map { RegionBackupDigest.sha256($0) }
         let secondHash = second.map { RegionBackupDigest.sha256($0) }
-        let metadataKeys = ["device", "inode", "size", "mode", "uid", "gid", "links", "mtimeSeconds", "mtimeNanoseconds", "ctimeSeconds", "ctimeNanoseconds"]
         let metadata = ["before", "between", "after", "namedAfter"].compactMap { file[$0] as? [String: Any] }
         let metadataComplete = metadata.count == 4 && metadata.allSatisfy { m in metadataKeys.allSatisfy { m[$0] is NSNumber } }
-        let metadataEqual = metadataComplete && metadata.dropFirst().allSatisfy { NSDictionary(dictionary: $0).isEqual(to: metadata[0]) }
+        let metadataEqual = metadataComplete && metadata.dropFirst().allSatisfy { equalFileMetadata($0, metadata[0]) }
         let readError = (file["errno"] as? NSNumber)?.intValue
         let stable = first != nil && first == second && firstHash == secondHash && metadataEqual &&
             file["stable"] as? Bool == true && readError == 0

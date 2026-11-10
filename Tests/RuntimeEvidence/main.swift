@@ -14,6 +14,8 @@ struct Fixture {
     var stable = true, error = 0
     var firstOverride: Data?, secondOverride: Data?
     var sectionsOverride: [[String: Any]]?
+    var metadataSnapshot = "after"
+    var metadataChanges: [String: Any] = [:]
     init() {
         for target in Collector.targets {
             let pointer = UInt64(0x1000000 + strings.count)
@@ -39,10 +41,11 @@ struct Fixture {
         observedImage["sections"] = sectionsOverride ?? [
             ["name": "__TEXT.__cstring", "address": 0x1000000, "data": strings],
             ["name": Collector.descriptorSection, "address": 0x2000000, "data": constants]]
-        return Collector.assemble(device: device, image: observedImage,
-            file: ["first": firstOverride ?? raw, "second": secondOverride ?? firstOverride ?? raw,
-                "stable": stable, "errno": error, "stage": "synthetic-double-read",
-                "before": metadata, "between": metadata, "after": metadata, "namedAfter": metadata],
+        var file: [String: Any] = ["first": firstOverride ?? raw, "second": secondOverride ?? firstOverride ?? raw,
+            "stable": stable, "errno": error, "stage": "synthetic-double-read",
+            "before": metadata, "between": metadata, "after": metadata, "namedAfter": metadata]
+        file[metadataSnapshot] = metadata.merging(metadataChanges) { _, changed in changed }
+        return Collector.assemble(device: device, image: observedImage, file: file,
             started: Date(timeIntervalSince1970: 1000.123), ended: Date(timeIntervalSince1970: 1000.456))
     }
 }
@@ -50,7 +53,17 @@ func status(_ report: [String: Any], _ id: String) -> String {
     (report["checks"] as! [[String: Any]]).first { $0["id"] as? String == id }!["status"] as! String
 }
 func binding(_ report: [String: Any]) -> String { (report["assessment"] as! [String: Any])["runtimeBinding"] as! String }
+func diagnose(_ report: [String: Any], _ label: String) {
+    let cache = report["cacheInstance"] as! [String: Any]
+    var lines = ["Runtime evidence diagnostic: \(label); binding=\(binding(report)); metadataEqual=\(cache["metadataEqual"] ?? "missing"); stable=\(cache["stableAcrossObservedReads"] ?? "missing"); errno=\(cache["errno"] ?? "missing")"]
+    for check in report["checks"] as! [[String: Any]] where check["status"] as? String != "PASS" {
+        lines.append("  \(check["id"] ?? "missing"): \(check["status"] ?? "missing") — \(check["detail"] ?? "missing")")
+    }
+    // stderr is flushed by the write before assertion aborts; fixture data only.
+    FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n").utf8))
+}
 let good = Fixture().report()
+if binding(good) != "PASS" { diagnose(good, "normal fixture") }
 assert(binding(good) == "PASS")
 assert((good["assessment"] as! [String: Any])["safeMutationAuthorization"] as? String == "NO-GO")
 assert((good["assessment"] as! [String: Any])["callbackPACAuthentication"] as? String == "Not Verified")
@@ -59,11 +72,38 @@ var cases = 0
 func rejects(_ id: String, expected: String = "FAIL", _ mutate: (inout Fixture) -> Void) {
     var f = Fixture(); mutate(&f)
     let report = f.report()
+    if status(report, id) != expected || binding(report) == "PASS" { diagnose(report, id) }
     assert(status(report, id) == expected, "\(id): \(status(report, id)) != \(expected)")
     assert(binding(report) != "PASS", id)
     assert((report["assessment"] as! [String: Any])["safeMutationAuthorization"] as? String == "NO-GO")
     cases += 1
 }
+// Preserve all eleven stat fields and compare their full NSNumber values.
+let metadataKeys = ["device", "inode", "size", "mode", "uid", "gid", "links", "mtimeSeconds", "mtimeNanoseconds", "ctimeSeconds", "ctimeNanoseconds"]
+assert(Collector.metadataKeys == metadataKeys)
+let swiftMetadata: [String: Any] = Dictionary(uniqueKeysWithValues: metadataKeys.map { ($0, 1 as Any) })
+let boxedMetadata: [String: Any] = Dictionary(uniqueKeysWithValues: metadataKeys.map { ($0, NSNumber(value: UInt64(1)) as Any) })
+assert(Collector.equalFileMetadata(swiftMetadata, swiftMetadata))
+assert(Collector.equalFileMetadata(swiftMetadata, boxedMetadata))
+assert(Collector.equalFileMetadata(boxedMetadata, swiftMetadata))
+for snapshot in ["before", "between", "after", "namedAfter"] {
+    for field in metadataKeys {
+        rejects("cache.stableFile") {
+            $0.metadataSnapshot = snapshot
+            $0.metadataChanges = [field: NSNumber(value: UInt64.max)]
+        }
+    }
+}
+rejects("cache.stableFile", expected: "INCOMPLETE") { $0.metadataChanges = ["inode": NSNull()] }
+rejects("cache.stableFile", expected: "INCOMPLETE") { $0.metadataChanges = ["mtimeNanoseconds": "invalid"] }
+rejects("cache.stableFile") { $0.metadataChanges = ["futureNumericField": 1] }
+var extended = swiftMetadata; extended["futureNumericField"] = NSNumber(value: UInt64.max)
+assert(Collector.equalFileMetadata(extended, extended))
+var changed = extended; changed["futureNumericField"] = NSNumber(value: UInt64.max - 1)
+assert(!Collector.equalFileMetadata(extended, changed))
+assert(!Collector.equalFileMetadata(extended, swiftMetadata))
+var missing = swiftMetadata; missing.removeValue(forKey: "inode")
+assert(!Collector.equalFileMetadata(missing, missing))
 rejects("image.uuid") { $0.image["binaryUUID"] = UUID().uuidString }
 rejects("device.productType") { $0.device["productType"] = "iPhone17,1" }
 rejects("device.systemVersion") { $0.device["systemVersion"] = "27.1" }
@@ -107,7 +147,9 @@ rejects("cache.stableFile") { $0.secondOverride = Data([0, 1]); $0.stable = fals
 rejects("cache.stableFile", expected: "INCOMPLETE") { $0.stable = false; $0.error = Int(POSIXErrorCode.EACCES.rawValue) }
 rejects("cache.plist") { $0.firstOverride = Data("not a plist".utf8) }
 var f = Fixture(); for target in Collector.targets { f.cache[target.slot * 8] = 0 }
-assert(binding(f.report()) == "PASS") // Values need not match a target or past device observation.
+let allFalse = f.report()
+if binding(allFalse) != "PASS" { diagnose(allFalse, "all-false fixture") }
+assert(binding(allFalse) == "PASS") // Values need not match a target or past device observation.
 let temp = FileManager.default.temporaryDirectory.appendingPathComponent("LocusEvidenceTest-" + UUID().uuidString)
 try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: false)
 defer { try? FileManager.default.removeItem(at: temp) }
