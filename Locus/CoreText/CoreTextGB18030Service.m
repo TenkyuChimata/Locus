@@ -610,6 +610,7 @@ GERenderEmojiSample(CGFloat fontSize)
     UIImage *image =
         [renderer imageWithActions:
             ^(UIGraphicsImageRendererContext *context) {
+                (void)context;
                 [[UIColor whiteColor] setFill];
                 UIRectFill((CGRect){ .origin = CGPointZero, .size = canvasSize });
 
