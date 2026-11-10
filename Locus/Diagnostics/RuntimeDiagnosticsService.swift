@@ -41,6 +41,7 @@ let runtimeDiagnosticQuestions: [RuntimeDiagnosticQuestion] = [
 final class RuntimeDiagnosticsService: ObservableObject {
     @Published private(set) var runtimeAnswers: [String: Any] = [:]
     @Published private(set) var cacheExtra: [String: Any] = [:]
+    @Published private(set) var cacheLayout: [String: Any] = [:]
     @Published private(set) var chosenProperties: [String: Any] = [:]
     @Published private(set) var syscfgProperties: [String: Any] = [:]
     @Published private(set) var activation: [String: Any] = [:]
@@ -82,11 +83,17 @@ final class RuntimeDiagnosticsService: ObservableObject {
         do {
             if let plist = try gestalt.readCachePlist() as? [String: Any] {
                 cacheExtra = plist["CacheExtra"] as? [String: Any] ?? [:]
+                cacheLayout = JapanRegionCacheLayout.diagnostics(
+                    plist: plist, build: MobileGestaltAccess.currentOSBuild()
+                )
             } else {
                 cacheExtra = [:]
+                cacheLayout = [:]
+                errors.append("MobileGestalt cache: expected a dictionary.")
             }
         } catch {
             cacheExtra = [:]
+            cacheLayout = [:]
             errors.append("MobileGestalt cache: \(error.localizedDescription)")
         }
 

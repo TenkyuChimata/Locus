@@ -35,6 +35,35 @@ let duplicate = JapanRegionCacheLayout(size: layout.size, slotCount: layout.slot
                                       fields: [layout.fields[0], layout.fields[0]])
 refuses { try duplicate.validate(original) }
 
+// Synthetic 720-slot structural candidate. It is never a reviewed schema.
+var current = Data(repeating: 0, count: 6480)
+current[0x2B5 * 8] = 100
+let currentPlist: [String: Any] = [
+    "CacheUUID": "00000000-0000-4000-8000-000000000001",
+    "CacheVersion": "24B119", "CacheData": current, "CacheExtra": [:] as [String: Any]
+]
+let observation = JapanRegionCacheLayout.diagnostics(plist: currentPlist, build: "24B119")
+assert(observation["cacheUUIDType"] as? String == "String")
+assert(observation["cacheUUIDValid"] as? Bool == true)
+assert(observation["cacheVersionMatchesBuild"] as? Bool == true)
+assert(observation["candidateSlotCount"] as? Int == 720)
+assert(observation["candidateValidityOffset"] as? Int == 5760)
+assert(observation["candidateValidityCanonical"] as? Bool == true)
+assert(observation["layoutSupported"] as? Bool == false)
+refuses { _ = try JapanRegionCacheLayout.resolve(plist: currentPlist, build: "24B119") }
+current[5760] = 2
+let invalidFlags = JapanRegionCacheLayout.diagnostics(plist: ["CacheData": current], build: "24B119")
+assert(invalidFlags["candidateValidityCanonical"] as? Bool == false)
+for wrong in [Data(), Data(repeating: 0, count: 8)] {
+    let info = JapanRegionCacheLayout.diagnostics(plist: ["CacheData": wrong], build: "")
+    assert(info["candidateSlotCount"] == nil && info["layoutSupported"] as? Bool == false)
+}
+let wrongTypes = JapanRegionCacheLayout.diagnostics(
+    plist: ["CacheUUID": Data(repeating: 1, count: 16), "CacheVersion": 24, "CacheData": "text"], build: "24B119")
+assert(wrongTypes["cacheUUIDType"] as? String == "Data")
+assert(wrongTypes["cacheUUIDValid"] as? Bool == false)
+assert(wrongTypes["cacheVersionMatchesBuild"] as? Bool == false)
+
 let profile = JapanRegionProfile.verified(for: "iPhone17,3")!
 assert(profile.regulatoryModel == "A3286")
 assert(JapanRegionProfile.verified(for: "iPhone999,1") == nil)

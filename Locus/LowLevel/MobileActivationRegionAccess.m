@@ -13,6 +13,7 @@
 #import <errno.h>
 #import <fcntl.h>
 #import <stdint.h>
+#import <sys/stat.h>
 #import <unistd.h>
 
 typedef char * _Nullable (*LocusSystemGroupResolver)(
@@ -24,6 +25,8 @@ typedef char * _Nullable (*LocusSystemGroupResolver)(
 typedef CFDictionaryRef _Nullable (*LocusCopyDeviceRegionInfo)(
     CFErrorRef _Nullable * _Nullable error
 );
+
+typedef const char * _Nullable (*LocusContainerErrorDescription)(uint64_t status);
 
 static NSString * const LocusActivationFramework =
     @"/System/Library/PrivateFrameworks/"
@@ -48,6 +51,55 @@ static NSError *LocusActivationError(NSInteger code, NSString *message)
     return [NSError errorWithDomain:@"io.github.tenkyuchimata.locus.mobileactivation"
                                code:code
                            userInfo:@{NSLocalizedDescriptionKey: message}];
+}
+
+// Diagnostics retain phases and error domains/codes, never metadata contents,
+// sandbox tokens or per-container UUIDs. A denied stat is not absence evidence.
+static NSString *LocusSafeDiagnosticText(NSString *text)
+{
+    NSRegularExpression *uuid = [NSRegularExpression regularExpressionWithPattern:
+        @"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+        options:0 error:NULL];
+    return [uuid stringByReplacingMatchesInString:text options:0
+        range:NSMakeRange(0, text.length) withTemplate:@"<UUID>"];
+}
+
+static NSDictionary *LocusErrorDetails(NSError *error, NSString *stage)
+{
+    NSMutableArray *chain = [NSMutableArray array];
+    NSError *current = error;
+    for (NSUInteger depth = 0; current && depth < 4; depth++) {
+        [chain addObject:@{@"domain": current.domain, @"code": @(current.code)}];
+        id underlying = current.userInfo[NSUnderlyingErrorKey];
+        current = [underlying isKindOfClass:NSError.class] ? underlying : nil;
+    }
+    return @{@"stage": stage, @"errors": chain};
+}
+
+static void LocusRecordFailure(NSMutableDictionary *diagnostics,
+                               NSString *stage, NSError *error)
+{
+    diagnostics[@"backingStage"] = stage;
+    diagnostics[@"backingErrorDetails"] = LocusErrorDetails(error, stage);
+}
+
+static NSDictionary *LocusPathState(NSString *path)
+{
+    struct stat state;
+    if (lstat(path.fileSystemRepresentation, &state) != 0) {
+        int code = errno;
+        return @{@"state": @"stat-failed; existence unknown",
+                 @"domain": NSPOSIXErrorDomain, @"code": @(code)};
+    }
+    NSString *kind = S_ISREG(state.st_mode) ? @"regular-file" :
+        S_ISDIR(state.st_mode) ? @"directory" :
+        S_ISLNK(state.st_mode) ? @"symlink" : @"other";
+    return @{@"state": kind};
+}
+
+static void LocusIncrement(NSMutableDictionary *summary, NSString *key)
+{
+    summary[key] = @([summary[key] unsignedIntegerValue] + 1);
 }
 
 static NSString *LocusPrivateVarPath(NSString *path)
@@ -260,11 +312,36 @@ static NSString * _Nullable LocusResolveSystemGroupNormally(
 }
 
 static NSString * _Nullable LocusResolveSystemGroupWithFallback(
-    NSError **error
+    NSError **error,
+    NSMutableDictionary *diagnostics
 )
 {
-    NSString *normalPath = LocusResolveSystemGroupNormally(NULL, NULL);
+    NSNumber *status = nil;
+    NSString *detail = nil;
+    NSString *normalPath = LocusResolveSystemGroupNormally(&status, &detail);
+    diagnostics[@"resolverSucceeded"] = @(normalPath.length > 0);
+    diagnostics[@"resolverStatus"] = status ?: NSNull.null;
+    diagnostics[@"resolverDetail"] = detail ?: NSNull.null;
+    // Ask this loaded ContainerManager for its enum label when available.
+    // Never interpret its private status as errno or an MAE NSError code.
+    NSString *statusName = nil;
+    if (diagnostics && status) {
+        LocusContainerErrorDescription describe = (LocusContainerErrorDescription)
+            dlsym(RTLD_DEFAULT, "container_get_error_description");
+        const char *name = describe ? describe(status.unsignedLongLongValue) : NULL;
+        if (name) statusName = [NSString stringWithUTF8String:name];
+    }
+    diagnostics[@"resolverStatusName"] = statusName ?: NSNull.null;
+    NSMutableDictionary *discovery = [NSMutableDictionary dictionaryWithDictionary:@{
+        @"inodeLimit": @(LocusSystemGroupInodeLimit),
+        @"source": @"unresolved",
+        @"candidateCount": @0, @"uuidCandidateCount": @0,
+        @"metadataLeaseFailures": @0, @"metadataReadFailures": @0,
+        @"metadataParseFailures": @0, @"metadataIdentifierMismatches": @0
+    }];
+    diagnostics[@"discovery"] = discovery;
     if (normalPath.length > 0) {
+        discovery[@"source"] = @"normal-resolver";
         if (error) {
             *error = nil;
         }
@@ -273,6 +350,7 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
 
     @synchronized (MobileActivationRegionAccess.class) {
         if (LocusCachedActivationSystemGroupPath.length > 0) {
+            discovery[@"source"] = @"cached-metadata-match";
             if (error) {
                 *error = nil;
             }
@@ -282,6 +360,8 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
 
     NSString *configurationError = WorseQueryAccessConfigurationError();
     if (configurationError) {
+        LocusRecordFailure(diagnostics, @"access-configuration",
+                           LocusActivationError(10, configurationError));
         if (error) {
             *error = LocusActivationError(
                 10,
@@ -298,6 +378,8 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
         &listDetail
     );
     if (!candidates) {
+        LocusRecordFailure(diagnostics, @"inode-enumeration",
+            LocusActivationError(11, listDetail ?: @"SystemGroup enumeration failed."));
         if (error) {
             *error = LocusActivationError(
                 11,
@@ -307,38 +389,58 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
         return nil;
     }
 
+    discovery[@"candidateCount"] = @(candidates.count);
     for (NSString *candidate in candidates) {
         if (![[NSUUID alloc] initWithUUIDString:candidate.lastPathComponent]) {
             continue;
         }
+        LocusIncrement(discovery, @"uuidCandidateCount");
         for (NSString *metadataName in @[LocusMetadataHidden, LocusMetadataPlain]) {
             NSString *leasePath = [candidate stringByAppendingPathComponent:metadataName];
             NSString *readPath = LocusPrivateVarPath(leasePath);
-            WorseQueryLease *lease = [WorseQueryLease leaseForPath:candidate error:NULL];
+            NSString *leaseDetail = nil;
+            WorseQueryLease *lease = [WorseQueryLease leaseForPath:candidate error:&leaseDetail];
             if (!lease) {
+                LocusIncrement(discovery, @"metadataLeaseFailures");
+                discovery[@"lastMetadataFailure"] = LocusErrorDetails(
+                    LocusActivationError(13, leaseDetail ?: @"Metadata lease failed."), @"metadata-lease");
+                discovery[@"lastMetadataLeaseDetail"] = LocusSafeDiagnosticText(leaseDetail ?: @"Unavailable");
                 continue;
             }
-            NSData *data = [NSData dataWithContentsOfFile:readPath];
-            [lease invalidate];
+            NSError *metadataError = nil;
+            NSData *data = nil;
+            @try {
+                data = [NSData dataWithContentsOfFile:readPath options:0 error:&metadataError];
+            } @finally {
+                [lease invalidate];
+            }
             if (!data) {
+                LocusIncrement(discovery, @"metadataReadFailures");
+                discovery[@"lastMetadataFailure"] = LocusErrorDetails(
+                    metadataError ?: LocusActivationError(20, @"Metadata read failed."), @"metadata-read");
                 continue;
             }
 
             id plist = [NSPropertyListSerialization propertyListWithData:data
                                                                   options:0
                                                                    format:NULL
-                                                                    error:NULL];
+                                                                    error:&metadataError];
             if (![plist isKindOfClass:NSDictionary.class]) {
+                LocusIncrement(discovery, @"metadataParseFailures");
+                discovery[@"lastMetadataFailure"] = LocusErrorDetails(
+                    metadataError ?: LocusActivationError(23, @"Metadata is not a dictionary."), @"metadata-parse");
                 continue;
             }
             NSDictionary *metadata = (NSDictionary *)plist;
             if (![metadata[LocusMetadataIdentifier] isEqual:LocusActivationSystemGroup]) {
+                LocusIncrement(discovery, @"metadataIdentifierMismatches");
                 continue;
             }
 
             @synchronized (MobileActivationRegionAccess.class) {
                 LocusCachedActivationSystemGroupPath = [candidate copy];
             }
+            discovery[@"source"] = @"inode-metadata-match";
             if (error) {
                 *error = nil;
             }
@@ -346,6 +448,8 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
         }
     }
 
+    LocusRecordFailure(diagnostics, @"systemgroup-discovery",
+        LocusActivationError(12, @"No matching metadata in the bounded scan; absence is not established."));
     if (error) {
         *error = LocusActivationError(
             12,
@@ -357,10 +461,11 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
 
 static WorseQueryLease * _Nullable LocusAcquireRegionLease(
     NSString * _Nullable *readPathOut,
-    NSError **error
+    NSError **error,
+    NSMutableDictionary *diagnostics
 )
 {
-    NSString *groupPath = LocusResolveSystemGroupWithFallback(error);
+    NSString *groupPath = LocusResolveSystemGroupWithFallback(error, diagnostics);
     if (groupPath.length == 0) {
         return nil;
     }
@@ -369,10 +474,17 @@ static WorseQueryLease * _Nullable LocusAcquireRegionLease(
         stringByAppendingPathComponent:LocusActivationRelativePath];
     NSString *leasePath = LocusLeaseAliasPath(candidate);
     NSString *readPath = LocusPrivateVarPath(leasePath);
+    // Keep the resolved path available even if acquiring the lease fails.
+    if (readPathOut) *readPathOut = readPath;
+    if (diagnostics) {
+        diagnostics[@"regionLeaseTargetState"] = LocusPathState(leasePath.stringByDeletingLastPathComponent);
+    }
     NSString *leaseDetail = nil;
     WorseQueryLease *lease = [WorseQueryLease leaseForPath:leasePath.stringByDeletingLastPathComponent
                                                  error:&leaseDetail];
     if (!lease) {
+        LocusRecordFailure(diagnostics, @"region-lease",
+            LocusActivationError(13, leaseDetail ?: @"Region lease failed."));
         @synchronized (MobileActivationRegionAccess.class) {
             LocusCachedActivationSystemGroupPath = nil;
         }
@@ -385,9 +497,7 @@ static WorseQueryLease * _Nullable LocusAcquireRegionLease(
         return nil;
     }
 
-    if (readPathOut) {
-        *readPathOut = readPath;
-    }
+    diagnostics[@"backingStage"] = @"region-lease-acquired";
     if (error) {
         *error = nil;
     }
@@ -407,6 +517,9 @@ static NSDictionary * _Nullable LocusParsePlistData(
                                                           format:&format
                                                            error:error];
     if (![plist isKindOfClass:NSDictionary.class]) {
+        if (plist && error) {
+            *error = LocusActivationError(23, @"region_info.plist is not a dictionary.");
+        }
         return nil;
     }
     if (formatOut) {
@@ -463,7 +576,7 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
 {
     @synchronized (self) {
         NSString *readPath = nil;
-        WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, error);
+        WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, error, nil);
         if (!lease) {
             return nil;
         }
@@ -496,7 +609,7 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
 {
     @synchronized (self) {
         NSString *readPath = nil;
-        WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, error);
+        WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, error, nil);
         if (!lease) {
             return NO;
         }
@@ -604,7 +717,7 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
         }
 
         NSString *readPath = nil;
-        WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, error);
+        WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, error, nil);
         if (!lease) {
             return NO;
         }
@@ -631,34 +744,31 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
     @synchronized (self) {
         NSMutableDictionary<NSString *, id> *result = [NSMutableDictionary dictionary];
 
-        NSNumber *resolverStatus = nil;
-        NSString *resolverDetail = nil;
-        NSString *normalGroupPath = LocusResolveSystemGroupNormally(
-            &resolverStatus,
-            &resolverDetail
-        );
-        result[@"resolverSucceeded"] = @(normalGroupPath.length > 0);
-        result[@"resolverStatus"] = resolverStatus ?: NSNull.null;
-        result[@"resolverDetail"] = resolverDetail ?: NSNull.null;
-
         NSString *readPath = nil;
         NSError *leaseError = nil;
-        WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, &leaseError);
-        result[@"resolvedBackingPath"] = readPath ?: NSNull.null;
+        // One resolver observation belongs to this exact read attempt.
+        WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, &leaseError, result);
+        result[@"resolvedBackingPath"] = readPath ? LocusSafeDiagnosticText(readPath) : (id)NSNull.null;
+        result[@"backingPathState"] = @{@"state": @"not-observed"};
         result[@"backingReadSucceeded"] = @NO;
-        result[@"backingReadError"] = leaseError.localizedDescription ?: NSNull.null;
+        result[@"backingReadError"] = leaseError
+            ? LocusSafeDiagnosticText(leaseError.localizedDescription) : (id)NSNull.null;
         result[@"backingCountryCode"] = NSNull.null;
         result[@"backingRegionInfo"] = NSNull.null;
         result[@"backingSoftwareBehaviors"] = NSNull.null;
         result[@"mutationSchemaSupported"] = @NO;
-        result[@"mutationSchemaError"] = leaseError.localizedDescription ?: @"Backing data unavailable.";
+        result[@"mutationSchemaErrorDetails"] = NSNull.null;
+        result[@"mutationSchemaError"] = leaseError
+            ? LocusSafeDiagnosticText(leaseError.localizedDescription) : @"Backing data unavailable.";
 
         if (lease) {
             @try {
+                result[@"backingPathState"] = LocusPathState(readPath);
                 NSError *readError = nil;
                 NSData *data = [NSData dataWithContentsOfFile:readPath
                                                       options:NSDataReadingMappedIfSafe
                                                         error:&readError];
+                BOOL bytesRead = data != nil;
                 NSDictionary *backing = data
                     ? LocusParsePlistData(data, 0, NULL, &readError)
                     : nil;
@@ -666,8 +776,12 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
                     NSError *schemaError = nil;
                     result[@"mutationSchemaSupported"] = @(LocusValidateRegionSchema(backing, &schemaError));
                     result[@"mutationSchemaError"] = schemaError.localizedDescription ?: NSNull.null;
+                    result[@"mutationSchemaErrorDetails"] = schemaError
+                        ? LocusErrorDetails(schemaError, @"schema-validation") : (id)NSNull.null;
                     result[@"backingReadSucceeded"] = @YES;
                     result[@"backingReadError"] = NSNull.null;
+                    result[@"backingErrorDetails"] = NSNull.null;
+                    result[@"backingStage"] = @"complete";
                     result[@"backingCountryCode"] =
                         LocusFirstValue(backing, LocusCountryKeys()) ?: NSNull.null;
                     result[@"backingRegionInfo"] =
@@ -675,8 +789,12 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
                     result[@"backingSoftwareBehaviors"] =
                         LocusFirstValue(backing, LocusBehaviorKeys()) ?: NSNull.null;
                 } else {
-                    result[@"backingReadError"] =
-                        readError.localizedDescription ?: @"Could not parse the backing plist.";
+                    NSString *stage = bytesRead ? @"plist-parse" : @"file-read";
+                    readError = readError ?: LocusActivationError(bytesRead ? 23 : 20,
+                        bytesRead ? @"Could not parse the backing plist." : @"Could not read the backing plist.");
+                    LocusRecordFailure(result, stage, readError);
+                    result[@"backingReadError"] = LocusSafeDiagnosticText(readError.localizedDescription);
+                    result[@"mutationSchemaError"] = result[@"backingReadError"];
                 }
             } @finally {
                 [lease invalidate];
@@ -690,6 +808,7 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
         result[@"effectiveErrorDomain"] = NSNull.null;
         result[@"effectiveErrorCode"] = NSNull.null;
         result[@"effectiveErrorDescription"] = NSNull.null;
+        result[@"effectiveStage"] = @"framework-load";
 
         void *handle = dlopen(LocusActivationFramework.fileSystemRepresentation,
                               RTLD_LAZY | RTLD_LOCAL);
@@ -711,16 +830,19 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
             !regionKey || !*regionKey || !behaviorKey || !*behaviorKey) {
             result[@"effectiveErrorDescription"] =
                 @"Required MobileActivation device-region symbols are unavailable.";
+            result[@"effectiveStage"] = @"symbol-resolution";
             dlclose(handle);
             return [result copy];
         }
 
         CFErrorRef apiErrorRef = NULL;
         CFDictionaryRef dictionaryRef = copyRegion(&apiErrorRef);
+        result[@"effectiveStage"] = @"api-call";
         NSError *apiError = apiErrorRef ? (__bridge NSError *)apiErrorRef : nil;
         if (dictionaryRef && CFGetTypeID(dictionaryRef) == CFDictionaryGetTypeID()) {
             NSDictionary *dictionary = (__bridge NSDictionary *)dictionaryRef;
             result[@"effectiveCallSucceeded"] = @YES;
+            result[@"effectiveStage"] = @"complete";
             result[@"effectiveCountryCode"] = dictionary[*countryKey] ?: NSNull.null;
             result[@"effectiveRegionInfo"] = dictionary[*regionKey] ?: NSNull.null;
             result[@"effectiveSoftwareBehaviors"] = dictionary[*behaviorKey] ?: NSNull.null;
@@ -729,7 +851,13 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
             result[@"effectiveErrorDomain"] = apiError.domain ?: NSNull.null;
             result[@"effectiveErrorCode"] = @(apiError.code);
             result[@"effectiveErrorDescription"] =
-                apiError.localizedDescription ?: NSNull.null;
+                LocusSafeDiagnosticText(apiError.localizedDescription);
+            result[@"effectiveStage"] = @"api-error";
+        } else if (!dictionaryRef) {
+            result[@"effectiveErrorDescription"] = @"API returned NULL without an error.";
+        } else if (CFGetTypeID(dictionaryRef) != CFDictionaryGetTypeID()) {
+            result[@"effectiveStage"] = @"api-result-type";
+            result[@"effectiveErrorDescription"] = @"API returned a non-dictionary object.";
         }
 
         if (dictionaryRef) {

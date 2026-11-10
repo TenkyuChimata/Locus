@@ -9,3 +9,4 @@ clang -std=c17 -D_GNU_SOURCE -Wall -Wextra -Werror \
   -o "$temporary/workspace-tests"
 "$temporary/workspace-tests"
 python3 Tests/check_project.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s Tests -p 'test_*.py'

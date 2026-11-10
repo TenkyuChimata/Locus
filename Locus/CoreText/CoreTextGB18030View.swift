@@ -19,6 +19,7 @@ struct CoreTextGB18030View: View {
                     valueRow("CoreText Loaded", probe["coreTextLoaded"])
                     valueRow("Address Validated", probe["addressValidated"])
                     valueRow("Image", probe["imageName"])
+                    valueRow("Image UUID", probe["imageUUID"])
                     valueRow("Cached Byte Address", probe["cachedBoolRuntimeAddress"])
                     valueRow("Cached Predicate Byte", probe["cachedByte"])
                     valueRow("Once Complete", probe["onceComplete"])

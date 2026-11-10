@@ -5,6 +5,9 @@ import re
 
 root = Path(__file__).resolve().parents[1]
 project = (root / "Locus.xcodeproj/project.pbxproj").read_text()
+for local_evidence in ("iPhone17_CHA.plist", "iPhoneSE3_JA.plist"):
+    assert local_evidence not in project
+    assert not list((root / "Locus").rglob(local_evidence)), "Raw device evidence must not be an app resource"
 entitlements = plistlib.loads((root / "Locus/Locus.entitlements").read_bytes())
 assert entitlements == {
     "com.apple.security.application-groups": ["group.$(PRODUCT_BUNDLE_IDENTIFIER)"]

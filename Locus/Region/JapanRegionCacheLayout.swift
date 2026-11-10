@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
 
-/// CacheUUID identifies a descriptor schema, not an OS build. A UUID may be
-/// registered only after its three question-to-slot mappings have been audited
-/// against libMobileGestalt. Equal lengths or equal boolean answers do not prove
+/// CacheUUID is a candidate descriptor-schema key, not a proven binary identity.
+/// Its relationship to the descriptor table must be established in the binary.
+/// A UUID may be registered only after its three question-to-slot mappings have
+/// been audited against libMobileGestalt. Equal lengths or equal answers do not prove
 /// that mapping: in particular green-tea and wapi can have identical values.
 struct JapanRegionCacheLayout {
     struct BooleanField {
@@ -31,6 +32,64 @@ struct JapanRegionCacheLayout {
     // Do not manufacture a fingerprint. Until a descriptor audit supplies one,
     // all persisted layouts are unknown and mutation fails closed, on every OS.
     static let reviewedSchemas: [String: JapanRegionCacheLayout] = [:]
+
+    /// Structural observations only. A plausible 8N + N layout never registers
+    /// a schema or authorizes mutation; even its slot count remains a candidate.
+    static func diagnostics(plist: [String: Any], build: String) -> [String: Any] {
+        var result: [String: Any] = [
+            "cacheUUIDType": plistType(plist["CacheUUID"]),
+            "cacheVersionType": plistType(plist["CacheVersion"]),
+            "cacheDataType": plistType(plist["CacheData"]),
+            "cacheExtraType": plistType(plist["CacheExtra"]),
+            "layoutSupported": false,
+            "structuralStatus": "CacheData unavailable or wrong type"
+        ]
+        result["cacheUUID"] = plist["CacheUUID"] as? String ?? "<unavailable>"
+        result["cacheUUIDValid"] = (plist["CacheUUID"] as? String)
+            .flatMap { UUID(uuidString: $0) } != nil
+        result["cacheVersion"] = plist["CacheVersion"] as? String ?? "<unavailable>"
+        result["cacheVersionMatchesBuild"] = !build.isEmpty
+            && (plist["CacheVersion"] as? String) == build
+        if let data = plist["CacheData"] as? Data {
+            result["cacheDataLength"] = data.count
+            result["matchesHistoricalSize"] = data.count == known1947.size
+            if !data.isEmpty && data.count.isMultiple(of: 9) {
+                let count = data.count / 9
+                let validity = data.dropFirst(count * 8)
+                let canonical = validity.allSatisfy { $0 <= 1 }
+                result["candidateSlotCount"] = count
+                result["candidateValidityOffset"] = count * 8
+                result["candidateValidCount"] = validity.filter { $0 == 1 }.count
+                result["candidateValidityCanonical"] = canonical
+                result["structuralStatus"] = canonical
+                    ? "Consistent with uint64 LE slots + validity bytes; semantics unverified"
+                    : "Candidate validity bytes contain values other than 0 or 1"
+            } else {
+                result["structuralStatus"] = "Length is not a positive multiple of 9"
+            }
+        }
+        do {
+            _ = try resolve(plist: plist, build: build)
+            result["layoutSupported"] = true
+            result["mutationStatus"] = "Reviewed schema and current cache validated"
+        } catch {
+            result["mutationStatus"] = error.localizedDescription
+        }
+        return result
+    }
+
+    private static func plistType(_ value: Any?) -> String {
+        switch value {
+        case nil: return "missing"
+        case is String: return "String"
+        case is Data: return "Data"
+        case is [String: Any]: return "Dictionary"
+        case is [Any]: return "Array"
+        case is NSNumber: return "Number"
+        case is Date: return "Date"
+        default: return "unsupported"
+        }
+    }
 
     static func resolve(plist: [String: Any], build: String) throws -> Self {
         guard let uuid = plist["CacheUUID"] as? String,

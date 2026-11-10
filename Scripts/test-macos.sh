@@ -10,6 +10,10 @@ clang -fobjc-arc -fmodules -Wall -Wextra -Werror -Wno-nullability-completeness \
   Tests/NativeAccessTests.m Locus/LowLevel/MobileActivationRegionAccess.m \
   "$temporary/workspace.o" -o "$temporary/access-tests"
 "$temporary/access-tests"
+clang -fobjc-arc -fmodules -Wall -Wextra -Werror -Wno-nullability-completeness \
+  -I Locus/LowLevel -framework Foundation \
+  Tests/ActivationDiagnosticsTests.m -o "$temporary/activation-diagnostics-tests"
+"$temporary/activation-diagnostics-tests"
 for activation in 0 1; do
   clang -fobjc-arc -fmodules -Wall -Wextra -Werror -Wno-nullability-completeness \
     -DLOCUS_TEST_ACTIVATION="$activation" -I Locus/LowLevel -framework Foundation \

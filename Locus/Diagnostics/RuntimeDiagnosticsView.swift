@@ -24,6 +24,7 @@ struct RuntimeDiagnosticsView: View {
                 mobileActivationSection
                 deviceTreeSection
                 syscfgSection
+                cacheLayoutSection
                 mobileGestaltSection(group: .hardware, title: "Hardware Identity Sanity")
                 mobileGestaltSection(group: .region, title: "MobileGestalt Region / Runtime")
             }
@@ -52,6 +53,15 @@ struct RuntimeDiagnosticsView: View {
             sourceHeader("Direct region_info.plist")
             valueRow("Backing Path", service.activation["resolvedBackingPath"])
             valueRow("Read Succeeded", service.activation["backingReadSucceeded"])
+            valueRow("Direct Stage", service.activation["backingStage"])
+            valueRow("Direct Error", service.activation["backingReadError"])
+            valueRow("Direct Error Details", service.activation["backingErrorDetails"])
+            valueRow("Path State", service.activation["backingPathState"])
+            valueRow("Lease Target State", service.activation["regionLeaseTargetState"])
+            valueRow("Discovery", service.activation["discovery"])
+            valueRow("Schema Supported", service.activation["mutationSchemaSupported"])
+            valueRow("Schema Error", service.activation["mutationSchemaError"])
+            valueRow("Schema Error Details", service.activation["mutationSchemaErrorDetails"])
             valueRow("CountryCode", service.activation["backingCountryCode"])
             valueRow("RegionInfo", service.activation["backingRegionInfo"])
             behaviorRow("SoftwareBehaviors", service.activation["backingSoftwareBehaviors"])
@@ -62,11 +72,41 @@ struct RuntimeDiagnosticsView: View {
             valueRow("RegionInfo", service.activation["effectiveRegionInfo"])
             behaviorRow("SoftwareBehaviors", service.activation["effectiveSoftwareBehaviors"])
             valueRow("API Error", service.activation["effectiveErrorDescription"])
+            valueRow("API Stage", service.activation["effectiveStage"])
+            valueRow("API Error Domain", service.activation["effectiveErrorDomain"])
+            valueRow("API Error Code", service.activation["effectiveErrorCode"])
             valueRow("Resolver Status", service.activation["resolverStatus"])
+            valueRow("Resolver Status Name", service.activation["resolverStatusName"])
+            valueRow("Resolver Detail", service.activation["resolverDetail"])
         } header: {
             Text("MobileActivation")
         } footer: {
-            Text("The direct backing file and MAECopyDeviceRegionInfoWithError are independent observations.")
+            Text("The direct backing file and MAECopyDeviceRegionInfoWithError are independent observations. Resolver status belongs to ContainerManager; path stat errors are POSIX errors.")
+        }
+    }
+
+    private var cacheLayoutSection: some View {
+        Section {
+            valueRow("CacheUUID", service.cacheLayout["cacheUUID"])
+            valueRow("CacheUUID Type", service.cacheLayout["cacheUUIDType"])
+            valueRow("CacheUUID Valid", service.cacheLayout["cacheUUIDValid"])
+            valueRow("CacheVersion", service.cacheLayout["cacheVersion"])
+            valueRow("CacheVersion Type", service.cacheLayout["cacheVersionType"])
+            valueRow("Matches OS Build", service.cacheLayout["cacheVersionMatchesBuild"])
+            valueRow("CacheData Type", service.cacheLayout["cacheDataType"])
+            valueRow("CacheData Bytes", service.cacheLayout["cacheDataLength"])
+            valueRow("CacheExtra Type", service.cacheLayout["cacheExtraType"])
+            valueRow("Candidate Slots", service.cacheLayout["candidateSlotCount"])
+            valueRow("Candidate Validity Offset", service.cacheLayout["candidateValidityOffset"])
+            valueRow("Candidate Valid Slots", service.cacheLayout["candidateValidCount"])
+            valueRow("Canonical Validity Bytes", service.cacheLayout["candidateValidityCanonical"])
+            valueRow("Structure", service.cacheLayout["structuralStatus"])
+            valueRow("Write Layout Supported", service.cacheLayout["layoutSupported"])
+            valueRow("Write Validation", service.cacheLayout["mutationStatus"])
+        } header: {
+            Text("MobileGestalt Cache Layout")
+        } footer: {
+            Text("Structural consistency does not establish question-to-slot mappings or enable writes.")
         }
     }
 
