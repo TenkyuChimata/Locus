@@ -21,7 +21,7 @@ enum CacheMappingStatus: String, Codable {
     case structurallyValid = "Structurally Valid", binaryVerified = "Binary Verified", writable = "Writable"
 }
 
-struct CacheDescriptor: Equatable, Codable {
+nonisolated struct CacheDescriptor: Equatable, Codable {
     let section: String
     let offset: Int
     let slot: Int
