@@ -13,9 +13,11 @@ struct RuntimeDiagnosticQuestion: Identifiable {
 
 let runtimeDiagnosticQuestions: [RuntimeDiagnosticQuestion] = [
     .init(title: "RegionCode", query: "RegionCode", cacheKey: JapanRegionMutation.regionCodeKey, group: .region),
-    .init(title: "RegionInfo", query: "RegionInfo", cacheKey: JapanRegionMutation.regionInfoKey, group: .region),
-    .init(title: "RegionInfo legacy key", query: "yK+xavymRGZ3xWc1tb8XDg", cacheKey: "yK+xavymRGZ3xWc1tb8XDg", group: .region),
-    .init(title: "RegionInfo current key candidate", query: "zHeENZu+wbg7PUprwNwBWg", cacheKey: "zHeENZu+wbg7PUprwNwBWg", group: .region),
+    // Distinct questions, not proven old/new aliases. Keep each cached value
+    // paired with its own question; matching runtime answers do not merge them.
+    .init(title: "RegionInfo", query: "RegionInfo", cacheKey: "zHeENZu+wbg7PUprwNwBWg", group: .region),
+    .init(title: "RegionInfoFromSysconfig (direct key)", query: "yK+xavymRGZ3xWc1tb8XDg", cacheKey: "yK+xavymRGZ3xWc1tb8XDg", group: .region),
+    .init(title: "RegionInfo (direct key)", query: "zHeENZu+wbg7PUprwNwBWg", cacheKey: "zHeENZu+wbg7PUprwNwBWg", group: .region),
     .init(title: "Apple Intelligence Capability", query: RegionModuleMutation.intelligenceKey, cacheKey: RegionModuleMutation.intelligenceKey, group: .region),
     .init(title: "RegulatoryModelNumber", query: "RegulatoryModelNumber", cacheKey: JapanRegionMutation.regulatoryModelKey, group: .region),
     .init(title: "WSKU", query: "gD8SNRcHQeIxCAvsp+2vjA", cacheKey: "gD8SNRcHQeIxCAvsp+2vjA", group: .hardware),
