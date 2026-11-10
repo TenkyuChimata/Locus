@@ -776,6 +776,8 @@ GERenderEmojiSample(CGFloat fontSize)
         return nil;
     }
 
+    NSString *build = GECurrentOSBuild();
+
     const struct mach_header_64 *header = NULL;
     intptr_t slide = 0;
     NSString *imageName = nil;
