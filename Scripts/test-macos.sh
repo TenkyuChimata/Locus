@@ -9,7 +9,7 @@ clang -std=c17 -Wall -Wextra -Werror -c Locus/LowLevel/WorseQueryWorkspace.c \
 clang -std=c17 -Wall -Wextra -Werror -c Locus/LowLevel/InPlaceFileTransaction.c \
   -o "$temporary/in-place.o"
 clang -fobjc-arc -fmodules -Wall -Wextra -Werror -Wno-nullability-completeness \
-  -I Locus/LowLevel -framework Foundation -c Locus/LowLevel/MobileGestaltImage.m \
+  -I Locus/LowLevel -c Locus/LowLevel/MobileGestaltImage.m \
   -o "$temporary/image.o"
 clang -fobjc-arc -fmodules -Wall -Wextra -Werror -Wno-nullability-completeness \
   -I Locus/LowLevel -framework Foundation \
