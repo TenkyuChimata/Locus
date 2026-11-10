@@ -5,26 +5,46 @@
 #import <dlfcn.h>
 #import <sys/stat.h>
 #import <assert.h>
+#import <objc/runtime.h>
+#import <string.h>
+#import <fcntl.h>
+#import <unistd.h>
+#import <stdlib.h>
 #import "../Locus/LowLevel/WorseQueryBridge.h"
 
 static void *TestOpen(const char *, int);
 static void *TestSymbol(void *, const char *);
 static int TestClose(void *);
 static int TestStat(const char *, struct stat *);
+static int TestFollowStat(const char *, struct stat *);
+static int TestFileOpen(const char *, int, ...);
+static int TestFileClose(int);
 #define dlopen TestOpen
 #define dlsym TestSymbol
 #define dlclose TestClose
 #define lstat TestStat
+#define stat(...) TestFollowStat(__VA_ARGS__)
+#define open TestFileOpen
+#define close TestFileClose
 #import "../Locus/LowLevel/MobileActivationRegionAccess.m"
 #undef dlopen
 #undef dlsym
 #undef dlclose
 #undef lstat
+#undef stat
+#undef open
+#undef close
 
 static NSString *normalPath, *configurationError;
 static NSArray<NSString *> *candidates;
 static BOOL failLease, failFramework, failSymbol, failAPI;
 static NSUInteger resolverCalls, acquired, invalidated;
+static BOOL queryEnabled, queryThrows, realStats, namedEnabled, denyPrivateMetadata;
+static NSArray<NSDictionary *> *queryObjects;
+static NSUInteger queriesCreated, queriesFreed, openDescriptors;
+static NSUInteger librariesOpened, librariesClosed;
+static NSString *namedFixture;
+static NSString *privateNamedDirectory;
 static NSString *countryKey = @"CountryCode", *regionKey = @"RegionInfo", *behaviorKey = @"SoftwareBehaviors";
 
 static char *Resolve(uint64_t argument, const char *identifier, uint64_t *status)
@@ -47,10 +67,31 @@ static const char *DescribeStatus(uint64_t status)
 {
     return status == 55 ? "SIMULATED_STATUS_55" : "SIMULATED_SUCCESS";
 }
+static void *QueryCreate(void) { queriesCreated++; return malloc(1); }
+static void QueryClass(void *query, uint64_t value) { assert(query && value == 13); }
+static void QueryFree(void *query) { queriesFreed++; free(query); }
+static const char *ObjectPath(void *object)
+{
+    NSDictionary *value = (__bridge NSDictionary *)object;
+    return [value[@"path"] UTF8String];
+}
+static const char *ObjectIdentifier(void *object)
+{
+    NSDictionary *value = (__bridge NSDictionary *)object;
+    return [value[@"identifier"] UTF8String];
+}
+static void QueryIterate(void *query, bool (^visit)(void *))
+{
+    assert(query);
+    if (queryThrows) @throw [NSException exceptionWithName:@"SimulatedQueryFailure" reason:nil userInfo:nil];
+    for (NSDictionary *object in queryObjects) if (!visit((__bridge void *)object)) break;
+}
 static void *TestOpen(const char *path, int flags)
 {
     (void)path; (void)flags;
-    return failFramework ? NULL : (void *)1;
+    if (failFramework) return NULL;
+    librariesOpened++;
+    return (void *)1;
 }
 static void *TestSymbol(void *handle, const char *name)
 {
@@ -58,19 +99,74 @@ static void *TestSymbol(void *handle, const char *name)
     if (!strcmp(name, "container_system_group_path_for_identifier")) return (void *)Resolve;
     if (!strcmp(name, "container_get_error_description")) return (void *)DescribeStatus;
     if (failSymbol) return NULL;
+    if (queryEnabled) {
+        if (!strcmp(name, "container_query_create")) return (void *)QueryCreate;
+        if (!strcmp(name, "container_query_set_class")) return (void *)QueryClass;
+        if (!strcmp(name, "container_query_iterate_results_sync")) return (void *)QueryIterate;
+        if (!strcmp(name, "container_query_free")) return (void *)QueryFree;
+        if (!strcmp(name, "container_object_get_path")) return (void *)ObjectPath;
+        if (!strcmp(name, "container_object_get_identifier")) return (void *)ObjectIdentifier;
+    }
     if (!strcmp(name, "MAECopyDeviceRegionInfoWithError")) return (void *)CopyRegion;
     if (!strcmp(name, "kMADeviceRegionCountryCode")) return &countryKey;
     if (!strcmp(name, "kMADeviceRegionRegionInfo")) return &regionKey;
     if (!strcmp(name, "kMADeviceRegionSoftwareBehaviors")) return &behaviorKey;
     return NULL;
 }
-static int TestClose(void *handle) { (void)handle; return 0; }
+static int TestClose(void *handle) { assert(handle); librariesClosed++; return 0; }
 static int TestStat(const char *path, struct stat *state)
 {
-    (void)path; (void)state;
+    if (realStats) return lstat(path, state);
     errno = EACCES;
     return -1; // denied metadata must remain unknown, never "missing"
 }
+static int TestFollowStat(const char *path, struct stat *state)
+{
+    if (strstr(path, "/containers/Shared/SystemGroup")) { errno = ENOENT; return -1; }
+    return stat(path, state);
+}
+static int TestFileOpen(const char *path, int flags, ...)
+{
+    NSString *actual = [NSString stringWithUTF8String:path];
+    NSString *named = [LocusSystemGroupRoot stringByAppendingPathComponent:LocusActivationSystemGroup];
+    if (namedEnabled && ([actual isEqual:named] || [actual isEqual:LocusPrivateVarPath(named)])) {
+        actual = [actual isEqual:LocusPrivateVarPath(named)] && privateNamedDirectory ?
+            privateNamedDirectory : namedFixture.stringByDeletingLastPathComponent;
+    } else if (strstr(path, "/containers/Shared/SystemGroup")) { errno = ENOENT; return -1; }
+    int fd = open(actual.fileSystemRepresentation, flags);
+    if (fd >= 0) openDescriptors++;
+    return fd;
+}
+static int TestFileClose(int fd)
+{
+    assert(openDescriptors > 0); openDescriptors--;
+    return close(fd);
+}
+
+// Only the exact synthetic named metadata path is mapped to a temporary file.
+// Actual SystemGroup data is never read by this test.
+@interface NSData (LocusTestRead)
++ (NSData *)locusTestRead:(NSString *)path options:(NSDataReadingOptions)options error:(NSError **)error;
+@end
+@implementation NSData (LocusTestRead)
++ (NSData *)locusTestRead:(NSString *)path options:(NSDataReadingOptions)options error:(NSError **)error
+{
+    NSString *named = [[LocusSystemGroupRoot stringByAppendingPathComponent:LocusActivationSystemGroup]
+        stringByAppendingPathComponent:LocusMetadataHidden];
+    if (strstr(path.fileSystemRepresentation, "/containers/Shared/SystemGroup")) {
+        if (namedEnabled && ([path isEqual:named] || [path isEqual:LocusPrivateVarPath(named)])) {
+            if (!denyPrivateMetadata || [path isEqual:named]) {
+                return [self locusTestRead:namedFixture options:options error:error];
+            }
+        }
+        if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:260 userInfo:@{
+            NSUnderlyingErrorKey: [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOENT userInfo:nil]
+        }];
+        return nil;
+    }
+    return [self locusTestRead:path options:options error:error];
+}
+@end
 BOOL WorseQueryBridgeAvailable(void) { return YES; }
 NSString *WorseQueryAccessConfigurationError(void) { return configurationError; }
 NSArray<NSString *> *WorseQueryListImmediateChildren(NSString *path, uint64_t limit, NSString **error)
@@ -86,7 +182,8 @@ NSArray<NSString *> *WorseQueryListImmediateChildren(NSString *path, uint64_t li
 @implementation WorseQueryLease
 + (instancetype)leaseForPath:(NSString *)path error:(NSString **)error
 {
-    if (failLease) {
+    BOOL named = [path.lastPathComponent isEqual:LocusActivationSystemGroup];
+    if (failLease || (named && !namedEnabled)) {
         if (error) *error = @"simulated lease denial";
         return nil;
     }
@@ -104,6 +201,8 @@ static NSDictionary *Probe(void)
     NSDictionary *result = [MobileActivationRegionAccess.shared regionDiagnostics];
     assert(resolverCalls == before + 1); // status and direct read use one attempt
     assert(acquired == invalidated);
+    assert(queriesCreated == queriesFreed && openDescriptors == 0);
+    assert(librariesOpened == librariesClosed);
     return result;
 }
 static void WritePlist(id value, NSString *path)
@@ -112,6 +211,45 @@ static void WritePlist(id value, NSString *path)
         format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
     assert([data writeToFile:path atomically:NO]);
 }
+
+static void CheckIdentityQueries(void)
+{
+    queryEnabled = YES;
+    NSString *named = [LocusSystemGroupRoot stringByAppendingPathComponent:LocusActivationSystemGroup];
+    NSDictionary *object = @{@"path": named, @"identifier": LocusActivationSystemGroup};
+    NSMutableDictionary *summary = [NSMutableDictionary new];
+    queryObjects = @[object];
+    assert([LocusFindSystemGroupByQuery(summary) isEqual:named]);
+    assert([summary[@"identityQuery"][@"status"] isEqual:@"matched"]);
+    queryObjects = @[object, @{@"path": LocusPrivateVarPath(named), @"identifier": LocusActivationSystemGroup}];
+    assert([LocusFindSystemGroupByQuery(summary) isEqual:named]); // same normalized identity
+    NSString *other = [LocusSystemGroupRoot stringByAppendingPathComponent:@"00000000-0000-4000-8000-000000000001"];
+    queryObjects = @[object, @{@"path": other, @"identifier": LocusActivationSystemGroup}];
+    assert(!LocusFindSystemGroupByQuery(summary));
+    assert([summary[@"identityQuery"][@"status"] isEqual:@"ambiguous-matches"]);
+    for (NSString *bad in @[@"/tmp/unrelated", [named stringByAppendingPathComponent:@"nested"],
+                            [LocusSystemGroupRoot stringByAppendingPathComponent:@"../escape"]]) {
+        queryObjects = @[@{@"path": bad, @"identifier": LocusActivationSystemGroup}];
+        assert(!LocusFindSystemGroupByQuery(summary));
+        assert([summary[@"identityQuery"][@"status"] isEqual:@"invalid-match-path"]);
+    }
+    queryObjects = @[@{@"path": named, @"identifier": @"unrelated"}];
+    assert(!LocusFindSystemGroupByQuery(summary));
+    assert([summary[@"identityQuery"][@"status"] isEqual:@"no-visible-match"]);
+    NSMutableArray *many = [NSMutableArray new];
+    for (NSUInteger i = 0; i < 513; i++) [many addObject:object];
+    queryObjects = many;
+    assert(!LocusFindSystemGroupByQuery(summary));
+    assert([summary[@"identityQuery"][@"status"] isEqual:@"result-limit-reached"]);
+    queryThrows = YES;
+    assert(!LocusFindSystemGroupByQuery(summary));
+    assert([summary[@"identityQuery"][@"status"] isEqual:@"query-exception"]);
+    queryThrows = NO; queryEnabled = NO; queryObjects = nil;
+    assert(!LocusFindSystemGroupByQuery(summary));
+    assert([summary[@"identityQuery"][@"status"] isEqual:@"unavailable"]);
+    assert(queriesCreated == queriesFreed);
+    assert(librariesOpened == librariesClosed);
+}
 int main(void)
 {
     @autoreleasepool {
@@ -119,6 +257,10 @@ int main(void)
         NSString *directory = [temporary stringByAppendingPathComponent:@"Library/region_info"];
         NSFileManager *files = NSFileManager.defaultManager;
         assert([files createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:NULL]);
+        Method read = class_getClassMethod(NSData.class, @selector(dataWithContentsOfFile:options:error:));
+        Method testRead = class_getClassMethod(NSData.class, @selector(locusTestRead:options:error:));
+        method_exchangeImplementations(read, testRead);
+        CheckIdentityQueries();
         NSDictionary *result;
         configurationError = @"simulated signing mismatch";
         failAPI = YES;
@@ -153,6 +295,14 @@ int main(void)
         assert([result[@"discovery"][@"metadataIdentifierMismatches"] intValue] == 1);
 
         WritePlist(@{LocusMetadataIdentifier: LocusActivationSystemGroup}, metadata);
+        realStats = YES;
+        NSMutableDictionary *pathSummary = [NSMutableDictionary new];
+        struct stat identity;
+        assert(LocusProbeMetadataDirectory(temporary, @"control", pathSummary, &identity));
+        assert([pathSummary[@"control.hidden.lstat=regular-file"] intValue] == 1);
+        assert([pathSummary[@"control.plain.lookup-not-found-with-open-parent"] intValue] == 1);
+        assert(openDescriptors == 0);
+        realStats = NO;
         result = Probe();
         assert([result[@"discovery"][@"source"] isEqual:@"inode-metadata-match"]);
         assert([result[@"backingStage"] isEqual:@"file-read"]);
@@ -186,6 +336,32 @@ int main(void)
         assert([result[@"effectiveStage"] isEqual:@"complete"]);
         assert([original isEqual:[NSData dataWithContentsOfFile:backing]]);
 
+        // Identifier-named container omitted from the inode results. Only a
+        // matching metadata identifier may recover it, including /var-only reads.
+        LocusCachedActivationSystemGroupPath = nil;
+        normalPath = nil; candidates = @[];
+        namedFixture = metadata; namedEnabled = YES; denyPrivateMetadata = YES;
+        NSMutableDictionary *namedDiagnostics = [NSMutableDictionary new];
+        NSError *discoveryError = nil;
+        NSString *namedPath = LocusResolveSystemGroupWithFallback(&discoveryError, namedDiagnostics);
+        assert([namedPath isEqual:[LocusSystemGroupRoot stringByAppendingPathComponent:LocusActivationSystemGroup]]);
+        assert(!discoveryError);
+        assert([namedDiagnostics[@"discovery"][@"source"] isEqual:@"named-metadata-match"]);
+        assert([namedDiagnostics[@"discovery"][@"metadataAliasReadRecoveries"] intValue] == 1);
+        assert(![namedDiagnostics[@"discovery"][@"namedCandidateInScan"] boolValue]);
+        assert(acquired == invalidated && openDescriptors == 0);
+        LocusCachedActivationSystemGroupPath = nil;
+        privateNamedDirectory = directory;
+        NSMutableDictionary *differentAliases = [NSMutableDictionary new];
+        assert(!LocusResolveSystemGroupWithFallback(&discoveryError, differentAliases));
+        assert([differentAliases[@"discovery"][@"metadataAliasIdentityFailures"] intValue] == 1);
+        assert(acquired == invalidated && openDescriptors == 0);
+        privateNamedDirectory = nil;
+        WritePlist(@{LocusMetadataIdentifier: @"unrelated"}, metadata);
+        assert(!LocusResolveSystemGroupWithFallback(&discoveryError, [NSMutableDictionary new]));
+        assert(discoveryError.code == 12); // path name alone must never match
+        namedEnabled = NO; denyPrivateMetadata = NO; normalPath = temporary;
+
         failSymbol = YES;
         result = Probe();
         assert([result[@"effectiveStage"] isEqual:@"symbol-resolution"]);
@@ -193,6 +369,7 @@ int main(void)
         result = Probe();
         assert([result[@"effectiveStage"] isEqual:@"framework-load"]);
         assert([files removeItemAtPath:temporary error:NULL]);
+        method_exchangeImplementations(read, testRead);
         puts("PASS: activation phase/error separation, redaction, read-only schema checks and lease cleanup (simulated APIs)");
     }
 }

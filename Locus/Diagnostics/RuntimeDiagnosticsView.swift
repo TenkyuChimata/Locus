@@ -58,7 +58,12 @@ struct RuntimeDiagnosticsView: View {
             valueRow("Direct Error Details", service.activation["backingErrorDetails"])
             valueRow("Path State", service.activation["backingPathState"])
             valueRow("Lease Target State", service.activation["regionLeaseTargetState"])
-            valueRow("Discovery", service.activation["discovery"])
+            valueRow("Discovery", activationDiscovery.filter {
+                !["identityQuery", "metadataPathProbes", "metadataReadErrors"].contains($0.key)
+            })
+            valueRow("Identity Query", activationDiscovery["identityQuery"])
+            valueRow("Metadata Read Errors", activationDiscovery["metadataReadErrors"])
+            valueRow("Metadata Path Probes", activationDiscovery["metadataPathProbes"])
             valueRow("Schema Supported", service.activation["mutationSchemaSupported"])
             valueRow("Schema Error", service.activation["mutationSchemaError"])
             valueRow("Schema Error Details", service.activation["mutationSchemaErrorDetails"])
@@ -83,6 +88,10 @@ struct RuntimeDiagnosticsView: View {
         } footer: {
             Text("The direct backing file and MAECopyDeviceRegionInfoWithError are independent observations. Resolver status belongs to ContainerManager; path stat errors are POSIX errors.")
         }
+    }
+
+    private var activationDiscovery: [String: Any] {
+        service.activation["discovery"] as? [String: Any] ?? [:]
     }
 
     private var cacheLayoutSection: some View {

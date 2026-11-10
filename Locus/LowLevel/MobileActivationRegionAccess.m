@@ -13,6 +13,7 @@
 #import <errno.h>
 #import <fcntl.h>
 #import <stdint.h>
+#import <stdbool.h>
 #import <sys/stat.h>
 #import <unistd.h>
 
@@ -102,6 +103,84 @@ static void LocusIncrement(NSMutableDictionary *summary, NSString *key)
     summary[key] = @([summary[key] unsignedIntegerValue] + 1);
 }
 
+static NSString *LocusFileKind(mode_t mode)
+{
+    return S_ISDIR(mode) ? @"directory" : S_ISREG(mode) ? @"regular-file" :
+        S_ISLNK(mode) ? @"symlink" : @"other";
+}
+
+// Fixed labels and aggregate outcomes only: no paths, inode identities or data.
+static void LocusProbeCount(NSMutableDictionary *summary, NSString *label,
+                            int result, int code, const struct stat *state)
+{
+    NSString *outcome = result == 0 ? (state ? LocusFileKind(state->st_mode) : @"opened") :
+        [NSString stringWithFormat:@"%@:%d", NSPOSIXErrorDomain, code];
+    LocusIncrement(summary, [label stringByAppendingFormat:@"=%@", outcome]);
+}
+
+static BOOL LocusProbeMetadataDirectory(NSString *path, NSString *label,
+                                        NSMutableDictionary *summary,
+                                        struct stat *identity)
+{
+    struct stat state;
+    int rc = lstat(path.fileSystemRepresentation, &state);
+    int code = errno;
+    LocusProbeCount(summary, [label stringByAppendingString:@".directory.lstat"], rc, code, &state);
+    rc = stat(path.fileSystemRepresentation, &state);
+    code = errno;
+    LocusProbeCount(summary, [label stringByAppendingString:@".directory.stat"], rc, code, &state);
+    int fd = open(path.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int directoryError = errno;
+    BOOL identified = NO;
+    @try {
+        LocusProbeCount(summary, [label stringByAppendingString:@".directory.open"], fd < 0 ? -1 : 0, directoryError, NULL);
+        if (fd >= 0) {
+            rc = fstat(fd, identity);
+            code = errno;
+            LocusProbeCount(summary, [label stringByAppendingString:@".directory.fstat"], rc, code, identity);
+            identified = rc == 0 && S_ISDIR(identity->st_mode);
+        }
+        for (NSString *name in @[LocusMetadataHidden, LocusMetadataPlain]) {
+            NSString *kind = [name isEqual:LocusMetadataHidden] ? @"hidden" : @"plain";
+            NSString *prefix = [label stringByAppendingFormat:@".%@", kind];
+            NSString *file = [path stringByAppendingPathComponent:name];
+            rc = lstat(file.fileSystemRepresentation, &state);
+            code = errno;
+            LocusProbeCount(summary, [prefix stringByAppendingString:@".lstat"], rc, code, &state);
+            rc = stat(file.fileSystemRepresentation, &state);
+            code = errno;
+            LocusProbeCount(summary, [prefix stringByAppendingString:@".stat"], rc, code, &state);
+            int metadataFD = open(file.fileSystemRepresentation, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            int openError = errno;
+            if (metadataFD >= 0) close(metadataFD);
+            LocusProbeCount(summary, [prefix stringByAppendingString:@".open"], metadataFD < 0 ? -1 : 0, openError, NULL);
+            if (fd >= 0) {
+                rc = fstatat(fd, name.fileSystemRepresentation, &state, AT_SYMLINK_NOFOLLOW);
+                int lookupError = errno;
+                LocusProbeCount(summary, [prefix stringByAppendingString:@".relative-lstat"], rc, lookupError, &state);
+                if (rc != 0 && lookupError == ENOENT) {
+                    LocusIncrement(summary, [prefix stringByAppendingString:@".lookup-not-found-with-open-parent"]);
+                }
+            }
+        }
+    } @finally {
+        if (fd >= 0) close(fd);
+    }
+    return identified;
+}
+
+static void LocusCountMetadataReadError(NSMutableDictionary *discovery,
+                                       NSString *alias, NSError *error)
+{
+    NSMutableDictionary *errors = discovery[@"metadataReadErrors"];
+    if (!errors) discovery[@"metadataReadErrors"] = errors = [NSMutableDictionary new];
+    NSMutableArray *parts = [NSMutableArray arrayWithObject:alias];
+    for (NSDictionary *item in LocusErrorDetails(error, @"metadata-read")[@"errors"]) {
+        [parts addObject:[NSString stringWithFormat:@"%@:%@", item[@"domain"], item[@"code"]]];
+    }
+    LocusIncrement(errors, [parts componentsJoinedByString:@" -> "]);
+}
+
 static NSString *LocusPrivateVarPath(NSString *path)
 {
     return [path hasPrefix:@"/var/"]
@@ -116,6 +195,109 @@ static NSString *LocusLeaseAliasPath(NSString *path)
         return [@"/var/" stringByAppendingString:suffix];
     }
     return path;
+}
+
+static void LocusProbeMetadataAliases(NSString *candidate, NSString *phase,
+                                      NSMutableDictionary *discovery)
+{
+    if (!discovery) return;
+    NSMutableDictionary *summary = discovery[@"metadataPathProbes"];
+    if (!summary) discovery[@"metadataPathProbes"] = summary = [NSMutableDictionary new];
+    NSString *alias = LocusLeaseAliasPath(candidate);
+    struct stat left = {0}, right = {0};
+    BOOL first = LocusProbeMetadataDirectory(alias, [phase stringByAppendingString:@".var"], summary, &left);
+    BOOL second = LocusProbeMetadataDirectory(LocusPrivateVarPath(alias),
+        [phase stringByAppendingString:@".privateVar"], summary, &right);
+    NSString *identity = first && second ?
+        (left.st_dev == right.st_dev && left.st_ino == right.st_ino ? @"same-directory" : @"different-directories") :
+        @"identity-unconfirmed";
+    LocusIncrement(summary, [phase stringByAppendingFormat:@".aliases=%@", identity]);
+}
+
+static BOOL LocusMetadataAliasesMatch(NSString *candidate)
+{
+    NSString *alias = LocusLeaseAliasPath(candidate);
+    int left = open(alias.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int right = -1;
+    BOOL same = NO;
+    @try {
+        right = open(LocusPrivateVarPath(alias).fileSystemRepresentation,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        struct stat a, b;
+        same = left >= 0 && right >= 0 && fstat(left, &a) == 0 && fstat(right, &b) == 0 &&
+            a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+    } @finally {
+        if (left >= 0) close(left);
+        if (right >= 0) close(right);
+    }
+    return same;
+}
+
+static BOOL LocusIsSystemGroupCandidate(NSString *path)
+{
+    NSString *alias = LocusLeaseAliasPath(path);
+    if (![alias isEqual:alias.stringByStandardizingPath] ||
+        ![alias.stringByDeletingLastPathComponent isEqual:LocusSystemGroupRoot] ||
+        [alias rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound) return NO;
+    return [alias.lastPathComponent isEqual:LocusActivationSystemGroup] ||
+        [[NSUUID alloc] initWithUUIDString:alias.lastPathComponent] != nil;
+}
+
+// One ordinary, read-only class-13 query. No flags/part/symlink/token operation.
+// Identity must come from ContainerManager and the path must stay in scope.
+static NSString *LocusFindSystemGroupByQuery(NSMutableDictionary *discovery)
+{
+    void *handle = dlopen("/usr/lib/system/libsystem_containermanager.dylib", RTLD_LAZY | RTLD_LOCAL);
+    NSMutableDictionary *summary = [NSMutableDictionary dictionaryWithDictionary:@{
+        @"status": @"unavailable", @"resultLimit": @512, @"results": @0,
+        @"identityMatches": @0, @"rejectedPaths": @0
+    }];
+    discovery[@"identityQuery"] = summary;
+    if (!handle) return nil;
+    NSString *found = nil;
+    @try {
+        void *(*create)(void) = dlsym(handle, "container_query_create");
+        void (*setClass)(void *, uint64_t) = dlsym(handle, "container_query_set_class");
+        void (*iterate)(void *, bool (^)(void *)) = dlsym(handle, "container_query_iterate_results_sync");
+        void (*freeQuery)(void *) = dlsym(handle, "container_query_free");
+        const char *(*getPath)(void *) = dlsym(handle, "container_object_get_path");
+        const char *(*getIdentifier)(void *) = dlsym(handle, "container_object_get_identifier");
+        if (!create || !setClass || !iterate || !freeQuery || !getPath || !getIdentifier) return nil;
+        void *query = create();
+        if (!query) { summary[@"status"] = @"query-create-failed"; return nil; }
+        @try {
+            setClass(query, 13);
+            __block NSUInteger count = 0;
+            __block BOOL truncated = NO;
+            NSMutableSet<NSString *> *matches = [NSMutableSet new];
+            iterate(query, ^bool(void *object) {
+                if (count >= 512) { truncated = YES; return false; }
+                count++;
+                const char *identifier = object ? getIdentifier(object) : NULL;
+                if (!identifier || strcmp(identifier, LocusActivationSystemGroup.UTF8String)) return true;
+                LocusIncrement(summary, @"identityMatches");
+                const char *bytes = getPath(object);
+                NSString *path = bytes ? [NSString stringWithUTF8String:bytes] : nil;
+                if (path && LocusIsSystemGroupCandidate(path)) [matches addObject:LocusLeaseAliasPath(path)];
+                else LocusIncrement(summary, @"rejectedPaths");
+                return true;
+            });
+            summary[@"results"] = @(count);
+            BOOL rejected = [summary[@"rejectedPaths"] unsignedIntegerValue] > 0;
+            summary[@"status"] = truncated ? @"result-limit-reached" : rejected ? @"invalid-match-path" :
+                matches.count > 1 ? @"ambiguous-matches" : matches.count == 1 ? @"matched" : @"no-visible-match";
+            if (!truncated && !rejected && matches.count == 1) found = matches.anyObject;
+        } @finally {
+            freeQuery(query);
+        }
+    } @catch (NSException *exception) {
+        (void)exception; // Never emit an exception reason containing private paths.
+        summary[@"status"] = @"query-exception";
+        found = nil;
+    } @finally {
+        dlclose(handle);
+    }
+    return found;
 }
 
 static NSString * _Nullable LocusExistingKey(
@@ -334,6 +516,8 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
     diagnostics[@"resolverStatusName"] = statusName ?: NSNull.null;
     NSMutableDictionary *discovery = [NSMutableDictionary dictionaryWithDictionary:@{
         @"inodeLimit": @(LocusSystemGroupInodeLimit),
+        @"inodeScanPerformed": @NO,
+        @"scanCoverage": @"bounded; completeness unproven",
         @"source": @"unresolved",
         @"candidateCount": @0, @"uuidCandidateCount": @0,
         @"metadataLeaseFailures": @0, @"metadataReadFailures": @0,
@@ -371,89 +555,141 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
         return nil;
     }
 
+    NSString *queriedPath = LocusFindSystemGroupByQuery(discovery);
+    if (queriedPath) {
+        discovery[@"source"] = @"container-manager-identity-match";
+        if (error) *error = nil;
+        return queriedPath;
+    }
+
+    // A readable root with an inode beyond the limit is evidence that this
+    // limit is not a volume-wide bound, not permission to extend the scan.
+    struct stat rootState;
+    if (stat(LocusSystemGroupRoot.fileSystemRepresentation, &rootState) == 0) {
+        discovery[@"rootInodeAboveLimit"] = @((uint64_t)rootState.st_ino > LocusSystemGroupInodeLimit);
+    } else {
+        int code = errno;
+        discovery[@"rootInodeError"] = @{@"domain": NSPOSIXErrorDomain, @"code": @(code)};
+    }
+
     NSString *listDetail = nil;
+    discovery[@"inodeScanPerformed"] = @YES;
     NSArray<NSString *> *candidates = WorseQueryListImmediateChildren(
         LocusSystemGroupRoot,
         LocusSystemGroupInodeLimit,
         &listDetail
     );
     if (!candidates) {
-        LocusRecordFailure(diagnostics, @"inode-enumeration",
-            LocusActivationError(11, listDetail ?: @"SystemGroup enumeration failed."));
-        if (error) {
-            *error = LocusActivationError(
-                11,
-                listDetail ?: @"Could not enumerate SystemGroup candidates."
-            );
-        }
-        return nil;
+        discovery[@"inodeEnumerationError"] = LocusErrorDetails(
+            LocusActivationError(11, listDetail ?: @"SystemGroup enumeration failed."), @"inode-enumeration");
     }
 
     discovery[@"candidateCount"] = @(candidates.count);
-    for (NSString *candidate in candidates) {
-        if (![[NSUUID alloc] initWithUUIDString:candidate.lastPathComponent]) {
+    // iOS 27 projects also use identifier-named SystemGroup children. Probe
+    // only this known identifier, without expanding the inode range. It still
+    // requires a metadata identity match; basename alone never authorizes it.
+    NSMutableOrderedSet<NSString *> *metadataCandidates = [NSMutableOrderedSet new];
+    for (NSString *candidate in candidates) [metadataCandidates addObject:LocusLeaseAliasPath(candidate)];
+    NSString *named = [LocusSystemGroupRoot stringByAppendingPathComponent:LocusActivationSystemGroup];
+    BOOL namedScanned = [metadataCandidates containsObject:named];
+    discovery[@"namedCandidateInScan"] = @(namedScanned);
+    [metadataCandidates addObject:named];
+    for (NSString *candidate in metadataCandidates) {
+        BOOL isUUID = [[NSUUID alloc] initWithUUIDString:candidate.lastPathComponent] != nil;
+        BOOL isNamed = [candidate isEqual:named];
+        if (!isUUID && !isNamed) {
+            LocusIncrement(discovery, @"skippedNonTargetNames");
             continue;
         }
-        LocusIncrement(discovery, @"uuidCandidateCount");
-        for (NSString *metadataName in @[LocusMetadataHidden, LocusMetadataPlain]) {
-            NSString *leasePath = [candidate stringByAppendingPathComponent:metadataName];
-            NSString *readPath = LocusPrivateVarPath(leasePath);
-            NSString *leaseDetail = nil;
-            WorseQueryLease *lease = [WorseQueryLease leaseForPath:candidate error:&leaseDetail];
-            if (!lease) {
-                LocusIncrement(discovery, @"metadataLeaseFailures");
-                discovery[@"lastMetadataFailure"] = LocusErrorDetails(
-                    LocusActivationError(13, leaseDetail ?: @"Metadata lease failed."), @"metadata-lease");
-                discovery[@"lastMetadataLeaseDetail"] = LocusSafeDiagnosticText(leaseDetail ?: @"Unavailable");
-                continue;
-            }
-            NSError *metadataError = nil;
-            NSData *data = nil;
-            @try {
-                data = [NSData dataWithContentsOfFile:readPath options:0 error:&metadataError];
-            } @finally {
-                [lease invalidate];
-            }
-            if (!data) {
-                LocusIncrement(discovery, @"metadataReadFailures");
-                discovery[@"lastMetadataFailure"] = LocusErrorDetails(
-                    metadataError ?: LocusActivationError(20, @"Metadata read failed."), @"metadata-read");
-                continue;
-            }
+        LocusIncrement(discovery, isUUID ? @"uuidCandidateCount" : @"namedCandidateCount");
+        if (diagnostics) LocusProbeMetadataAliases(candidate, @"beforeLease", discovery);
+        NSString *leaseDetail = nil;
+        // One directory lease covers both known metadata names and probes.
+        WorseQueryLease *lease = [WorseQueryLease leaseForPath:candidate error:&leaseDetail];
+        if (!lease) {
+            LocusIncrement(discovery, @"metadataLeaseFailures");
+            discovery[@"lastMetadataFailure"] = LocusErrorDetails(
+                LocusActivationError(13, leaseDetail ?: @"Metadata lease failed."), @"metadata-lease");
+            discovery[@"lastMetadataLeaseDetail"] = LocusSafeDiagnosticText(leaseDetail ?: @"Unavailable");
+            continue;
+        }
+        @try {
+            LocusIncrement(discovery, @"metadataDirectoriesLeased");
+            if (diagnostics) LocusProbeMetadataAliases(candidate, @"afterLease", discovery);
+            for (NSString *metadataName in @[LocusMetadataHidden, LocusMetadataPlain]) {
+                NSString *leasePath = [candidate stringByAppendingPathComponent:metadataName];
+                NSString *readPath = LocusPrivateVarPath(leasePath);
+                NSError *metadataError = nil;
+                NSData *data = [NSData dataWithContentsOfFile:readPath options:0 error:&metadataError];
+                if (!data) {
+                    LocusIncrement(discovery, @"metadataPrimaryReadFailures");
+                    LocusCountMetadataReadError(discovery, @"privateVar", metadataError);
+                    if (![readPath isEqual:leasePath]) {
+                        metadataError = nil;
+                        data = [NSData dataWithContentsOfFile:leasePath options:0 error:&metadataError];
+                        if (data) {
+                            if (!LocusMetadataAliasesMatch(candidate)) {
+                                LocusIncrement(discovery, @"metadataAliasIdentityFailures");
+                                discovery[@"lastMetadataFailure"] = LocusErrorDetails(
+                                    LocusActivationError(14, @"Metadata path aliases could not be confirmed as the same directory."),
+                                    @"metadata-alias-identity");
+                                continue;
+                            }
+                            LocusIncrement(discovery, @"metadataAliasReadRecoveries");
+                        } else LocusCountMetadataReadError(discovery, @"var", metadataError);
+                    }
+                }
+                if (!data) {
+                    LocusIncrement(discovery, @"metadataReadFailures");
+                    discovery[@"lastMetadataFailure"] = LocusErrorDetails(
+                        metadataError ?: LocusActivationError(20, @"Metadata read failed."), @"metadata-read");
+                    continue;
+                }
 
-            id plist = [NSPropertyListSerialization propertyListWithData:data
-                                                                  options:0
-                                                                   format:NULL
-                                                                    error:&metadataError];
-            if (![plist isKindOfClass:NSDictionary.class]) {
-                LocusIncrement(discovery, @"metadataParseFailures");
-                discovery[@"lastMetadataFailure"] = LocusErrorDetails(
-                    metadataError ?: LocusActivationError(23, @"Metadata is not a dictionary."), @"metadata-parse");
-                continue;
-            }
-            NSDictionary *metadata = (NSDictionary *)plist;
-            if (![metadata[LocusMetadataIdentifier] isEqual:LocusActivationSystemGroup]) {
-                LocusIncrement(discovery, @"metadataIdentifierMismatches");
-                continue;
-            }
+                metadataError = nil;
+                id plist = [NSPropertyListSerialization propertyListWithData:data
+                                                                      options:0
+                                                                       format:NULL
+                                                                        error:&metadataError];
+                if (![plist isKindOfClass:NSDictionary.class]) {
+                    LocusIncrement(discovery, @"metadataParseFailures");
+                    discovery[@"lastMetadataFailure"] = LocusErrorDetails(
+                        metadataError ?: LocusActivationError(23, @"Metadata is not a dictionary."), @"metadata-parse");
+                    continue;
+                }
+                NSDictionary *metadata = (NSDictionary *)plist;
+                if (![metadata[LocusMetadataIdentifier] isEqual:LocusActivationSystemGroup]) {
+                    LocusIncrement(discovery, @"metadataIdentifierMismatches");
+                    continue;
+                }
 
-            @synchronized (MobileActivationRegionAccess.class) {
-                LocusCachedActivationSystemGroupPath = [candidate copy];
+                @synchronized (MobileActivationRegionAccess.class) {
+                    LocusCachedActivationSystemGroupPath = [candidate copy];
+                }
+                discovery[@"source"] = isNamed ? @"named-metadata-match" : @"inode-metadata-match";
+                if (error) {
+                    *error = nil;
+                }
+                return candidate;
             }
-            discovery[@"source"] = @"inode-metadata-match";
-            if (error) {
-                *error = nil;
-            }
-            return candidate;
+        } @finally {
+            [lease invalidate];
         }
     }
 
+    if (!candidates) {
+        NSError *enumerationError = LocusActivationError(11,
+            listDetail ?: @"Could not enumerate SystemGroup candidates.");
+        LocusRecordFailure(diagnostics, @"inode-enumeration", enumerationError);
+        if (error) *error = enumerationError;
+        return nil;
+    }
     LocusRecordFailure(diagnostics, @"systemgroup-discovery",
         LocusActivationError(12, @"No matching metadata in the bounded scan; absence is not established."));
     if (error) {
         *error = LocusActivationError(
             12,
-            @"The bounded inode scan did not locate the MobileActivation SystemGroup."
+            @"No verified MobileActivation SystemGroup identity was found by the read-only query and bounded metadata probes. Absence is not established."
         );
     }
     return nil;
