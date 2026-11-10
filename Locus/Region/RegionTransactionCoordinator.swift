@@ -43,10 +43,17 @@ final class RegionTransactionCoordinator {
     let access: RegionFileAccess
     let productType: String
     let build: String
+    private let cacheImage: () -> [String: Any]
+    private let cacheReviews: [ReviewedCacheSchema]
+    private let cacheSystemVersion: String?
     private let fm = FileManager.default
 
-    init(root: URL, access: RegionFileAccess, productType: String, build: String) {
+    init(root: URL, access: RegionFileAccess, productType: String, build: String,
+         cacheImage: @escaping () -> [String: Any] = { RegionCacheMapping.loadedImage() },
+         cacheReviews: [ReviewedCacheSchema] = RegionCacheMapping.reviewed,
+         cacheSystemVersion: String? = nil) {
         self.root = root; self.access = access; self.productType = productType; self.build = build
+        self.cacheImage = cacheImage; self.cacheReviews = cacheReviews; self.cacheSystemVersion = cacheSystemVersion
     }
 
     func pending() throws -> [RegionJournal] {
@@ -126,6 +133,7 @@ final class RegionTransactionCoordinator {
         for plan in plans {
             try validateAuthorization(module: module, file: plan.file, scope: plan.scope)
             try plan.scope.validate(before: plan.before, after: plan.after)
+            if operation == "apply" { try validateCachePlan(module: module, plan: plan) }
             guard try access.read(plan.file) == plan.before else { throw RegionOperationError("Source changed since planning; nothing was written.") }
         }
         guard plans.contains(where: { $0.before != $0.after }) else {
@@ -168,6 +176,7 @@ final class RegionTransactionCoordinator {
             // Check every source again after backup I/O and before the first write.
             for plan in plans {
                 guard try access.read(plan.file) == plan.before else { throw RegionOperationError("Source changed during backup; transaction refused.") }
+                if operation == "apply" { try validateCachePlan(module: module, plan: plan) }
             }
             journal.phase = .writing
             try save(journal)
@@ -258,6 +267,32 @@ final class RegionTransactionCoordinator {
         guard files.count == expected.count, Set(files) == expected else {
             throw RegionOperationError("Transaction is missing a required module source; partial Full Japan transactions are forbidden.")
         }
+    }
+
+    /// A persisted byte whitelist is a recovery boundary, never new mutation
+    /// authority. Reassess the loaded image and exact source before applying.
+    /// Restore/rollback retain the original journal's bounds and byte checks.
+    private func validateCachePlan(module: RegionModule, plan: RegionWritePlan) throws {
+        guard plan.file == .mobileGestalt, !plan.scope.byteOffsets.isEmpty else { return }
+        let plist = try RegionPlist.parse(plan.before).root
+        let assessments = RegionCacheMapping.assess(plist: plist, build: build,
+            image: cacheImage(), writeAccess: true, reviews: cacheReviews,
+            productType: productType, systemVersion: cacheSystemVersion)
+        let questions = module == .fullJapan ? RegionCacheQuestion.allCases : module.question.map { [$0] } ?? []
+        guard !questions.isEmpty else { throw JapanRegionError.unverifiedCacheSemantics }
+        var offsets: Set<Int> = []
+        guard let after = try RegionPlist.parse(plan.after).root["CacheData"] as? Data else {
+            throw JapanRegionError.missingCacheData
+        }
+        for question in questions {
+            let layout = try RegionCacheMapping.layout(for: question, assessments: assessments,
+                plist: plist, productType: productType)
+            guard layout.isApplied(to: after), let field = layout.fields.first else {
+                throw JapanRegionError.invalidCachePatchLayout
+            }
+            offsets.formUnion(Array((field.slot * 8)..<(field.slot * 8 + 8)) + [layout.slotCount * 8 + field.slot])
+        }
+        guard offsets == Set(plan.scope.byteOffsets) else { throw JapanRegionError.unverifiedCacheSemantics }
     }
 
     private func validateAuthorization(module: RegionModule, file: RegionFile, scope: RegionPatchScope) throws {

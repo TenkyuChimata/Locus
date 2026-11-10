@@ -18,7 +18,8 @@ struct JapanRegionCacheLayout {
     let fields: [BooleanField]
 
     // Original recovered layout, retained without using its originating build
-    // as authorization. Values are uint64 little-endian, followed by valid bytes.
+    // as authorization. Each slot occupies eight bytes, followed by valid bytes;
+    // the audited type-11 consumer reads/writes only the slot's low byte.
     static let known1947 = JapanRegionCacheLayout(
         size: 0x1947, slotCount: 0x2CF,
         fields: [
@@ -36,7 +37,7 @@ struct JapanRegionCacheLayout {
 
     /// Structural observations only. A plausible 8N + N layout never registers
     /// a schema or authorizes mutation; even its slot count remains a candidate.
-    static func diagnostics(plist: [String: Any], build: String) -> [String: Any] {
+    static func diagnostics(plist: [String: Any], build: String, productType: String = "") -> [String: Any] {
         var result: [String: Any] = [
             "cacheUUIDType": plistType(plist["CacheUUID"]),
             "cacheVersionType": plistType(plist["CacheVersion"]),
@@ -70,7 +71,7 @@ struct JapanRegionCacheLayout {
             }
         }
         do {
-            _ = try resolve(plist: plist, build: build)
+            _ = try resolve(plist: plist, build: build, productType: productType)
             result["layoutSupported"] = true
             result["mutationStatus"] = "Reviewed schema and current cache validated"
         } catch {
@@ -92,12 +93,12 @@ struct JapanRegionCacheLayout {
         }
     }
 
-    static func resolve(plist: [String: Any], build: String) throws -> Self {
+    static func resolve(plist: [String: Any], build: String, productType: String = "") throws -> Self {
         let assessments = RegionCacheMapping.assess(plist: plist, build: build,
-            image: RegionCacheMapping.loadedImage(), writeAccess: false)
+            image: RegionCacheMapping.loadedImage(), writeAccess: false, productType: productType)
         if let data = plist["CacheData"] as? Data,
            assessments.count == RegionCacheQuestion.allCases.count,
-           assessments.allSatisfy({ $0.status == .binaryVerified || $0.status == .writable }) {
+           assessments.allSatisfy({ ($0.status == .binaryVerified || $0.status == .writable) && $0.valid == 1 }) {
             let layout = Self(size: data.count, slotCount: data.count / 9, fields: try assessments.map { item in
                 guard let descriptor = item.descriptor else { throw JapanRegionError.unverifiedCacheSemantics }
                 return .init(question: item.question.rawValue, slot: descriptor.slot, value: item.question.target)
@@ -140,13 +141,12 @@ struct JapanRegionCacheLayout {
         var result = original
         for field in fields {
             let offset = field.slot * 8
-            result.replaceSubrange(offset..<(offset + 8),
-                                   with: [field.value ? 1 : 0] + [UInt8](repeating: 0, count: 7))
+            result[offset] = field.value ? 1 : 0
             result[slotCount * 8 + field.slot] = 1
         }
         // Independently enforce the entire write set, including unchanged slots.
         let allowed = Set(fields.flatMap { field in
-            Array((field.slot * 8)..<(field.slot * 8 + 8)) + [slotCount * 8 + field.slot]
+            [field.slot * 8, slotCount * 8 + field.slot]
         })
         guard result.indices.allSatisfy({ result[$0] == original[$0] || allowed.contains($0) }) else {
             throw JapanRegionError.invalidCachePatchLayout

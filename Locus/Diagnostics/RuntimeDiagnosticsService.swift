@@ -72,7 +72,7 @@ final class RuntimeDiagnosticsService: ObservableObject {
         activation = activationAccess.regionDiagnostics()
         imageIdentity = RegionCacheMapping.loadedImage()
         cacheMapping = RegionCacheMapping.assess(plist: [:], build: MobileGestaltAccess.currentOSBuild(),
-            image: imageIdentity, writeAccess: false)
+            image: imageIdentity, writeAccess: false, productType: RealDeviceIdentity.productType)
 
         do {
             chosenProperties = try deviceTree.chosenProperties(
@@ -95,10 +95,10 @@ final class RuntimeDiagnosticsService: ObservableObject {
             if let plist = try gestalt.readCachePlist() as? [String: Any] {
                 cacheExtra = plist["CacheExtra"] as? [String: Any] ?? [:]
                 cacheLayout = JapanRegionCacheLayout.diagnostics(
-                    plist: plist, build: MobileGestaltAccess.currentOSBuild()
+                    plist: plist, build: MobileGestaltAccess.currentOSBuild(), productType: RealDeviceIdentity.productType
                 )
                 cacheMapping = RegionCacheMapping.assess(plist: plist, build: MobileGestaltAccess.currentOSBuild(),
-                    image: imageIdentity, writeAccess: false)
+                    image: imageIdentity, writeAccess: false, productType: RealDeviceIdentity.productType)
             } else {
                 cacheExtra = [:]
                 cacheLayout = [:]

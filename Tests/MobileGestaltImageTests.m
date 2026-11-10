@@ -98,6 +98,8 @@ static void Reset(intptr_t slide)
     testSlide = slide;
     imageCount = 1;
     fixture.header.magic = MH_MAGIC_64;
+    fixture.header.cputype = CPU_TYPE_ARM64;
+    fixture.header.cpusubtype = CPU_SUBTYPE_ARM64E;
     fixture.header.ncmds = 3;
     fixture.header.sizeofcmds = sizeof(fixture) - sizeof(fixture.header);
     fixture.uuid.cmd = LC_UUID;
@@ -129,6 +131,9 @@ int main(void)
             Reset(sign * 0x100000);
             NSDictionary *value = Snapshot();
             assert(!value[@"error"] && [value[@"sections"] count] == 2 && value[@"binaryUUID"]);
+            assert([value[@"cpuType"] unsignedIntValue] == CPU_TYPE_ARM64);
+            assert([value[@"cpuSubtype"] unsignedIntValue] == CPU_SUBTYPE_ARM64E);
+            assert([value[@"pointerRepresentation"] isEqual:@"dyld-resolved key addresses"]);
         }
         Reset(0); fixture.header.sizeofcmds = UINT32_MAX; assert(Snapshot()[@"error"]);
         Reset(0); fixture.header.ncmds++; assert(Snapshot()[@"error"]);

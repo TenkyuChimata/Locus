@@ -103,7 +103,7 @@ final class RegionIdentityService: ObservableObject {
         binaryUUID = image["binaryUUID"] as? String ?? "<unavailable>"
         let writeStatus = gestalt.cacheWriteAccessStatus()
         let writeAccess = (writeStatus["writable"] as? NSNumber)?.boolValue == true
-        let assessments = RegionCacheMapping.assess(plist: plist, build: build, image: image, writeAccess: writeAccess)
+        let assessments = RegionCacheMapping.assess(plist: plist, build: build, image: image, writeAccess: writeAccess, productType: productType)
         var transactionStore: RegionTransactionCoordinator?
         var blocked: String?
         var pendingTransactions: [RegionJournal] = []
@@ -144,7 +144,7 @@ final class RegionIdentityService: ObservableObject {
                 access = item.status.rawValue
                 detail += item.reason
                 if let descriptor = item.descriptor {
-                    detail += " \(descriptor.section)+0x\(String(descriptor.offset, radix: 16)); index=\(descriptor.slot), type=\(descriptor.type)."
+                    detail += " \(descriptor.section)+0x\(String(descriptor.offset, radix: 16)); index=\(descriptor.slot), type=\(descriptor.type), flags=0x\(String(descriptor.flags, radix: 16))."
                 }
                 applicable = item.permitsMutation
             } else {
@@ -205,7 +205,7 @@ final class RegionIdentityService: ObservableObject {
                 let raw = try fileAccess.read(.mobileGestalt)
                 let root = try RegionPlist.parse(raw).root
                 let assessments = RegionCacheMapping.assess(plist: root, build: build,
-                    image: RegionCacheMapping.loadedImage(), writeAccess: (gestalt.cacheWriteAccessStatus()["writable"] as? NSNumber)?.boolValue == true)
+                    image: RegionCacheMapping.loadedImage(), writeAccess: (gestalt.cacheWriteAccessStatus()["writable"] as? NSNumber)?.boolValue == true, productType: productType)
                 plans = [try RegionModuleMutation.plan(module: module, raw: raw, productType: productType, assessments: assessments)]
             }
             comparisons = plans.flatMap(\.comparison)
@@ -245,7 +245,7 @@ final class RegionIdentityService: ObservableObject {
         let parsed = try RegionPlist.parse(mg)
         guard let profile = JapanRegionProfile.verified(for: productType) else { throw JapanRegionError.unsupportedProductType(productType) }
         let modified = try JapanRegionMutation.applying(to: parsed.root, profile: profile, build: build)
-        let layout = try JapanRegionCacheLayout.resolve(plist: parsed.root, build: build)
+        let layout = try JapanRegionCacheLayout.resolve(plist: parsed.root, build: build, productType: productType)
         let extra = parsed.root["CacheExtra"] as? [String: Any] ?? [:]
         let scope = RegionPatchScope(extraKeys: [JapanRegionMutation.regionCodeKey,
             try RegionModuleMutation.identityKey(.regionInfo, extra: extra), JapanRegionMutation.regulatoryModelKey],

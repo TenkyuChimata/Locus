@@ -26,6 +26,7 @@ struct CacheDescriptor: Equatable, Codable {
     let offset: Int
     let slot: Int
     let type: UInt32
+    let flags: UInt8
 }
 
 struct CacheMappingAssessment {
@@ -43,6 +44,8 @@ struct CacheMappingBinding: Equatable {
     let cacheUUID: String
     let version: String
     let byteCount: Int
+    let productType: String
+    let cacheData: Data
 }
 
 /// Register only after independently tracing the UUID source, descriptor
@@ -53,12 +56,22 @@ struct ReviewedCacheSchema {
     let cacheUUID: String
     let build: String
     let byteCount: Int
+    let productType: String
+    let systemVersion: String
     let descriptors: [RegionCacheQuestion: CacheDescriptor]
     let evidence: String
+    /// A separate, completed loaded-image/fixup and device-cache review. Offline
+    /// binary evidence must never be copied here to promote an offline result.
+    let runtimeEvidence: String
 }
 
 enum RegionCacheMapping {
     static let reviewed: [ReviewedCacheSchema] = []
+
+    static var currentSystemVersion: String {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        return "\(version.majorVersion).\(version.minorVersion)" + (version.patchVersion == 0 ? "" : ".\(version.patchVersion)")
+    }
 
     static func loadedImage() -> [String: Any] {
         #if os(iOS)
@@ -69,7 +82,8 @@ enum RegionCacheMapping {
     }
 
     static func assess(plist: [String: Any], build: String, image: [String: Any],
-                       writeAccess: Bool, reviews: [ReviewedCacheSchema] = reviewed) -> [CacheMappingAssessment] {
+                       writeAccess: Bool, reviews: [ReviewedCacheSchema] = reviewed,
+                       productType: String = "", systemVersion: String? = nil) -> [CacheMappingAssessment] {
         func all(_ status: CacheMappingStatus, _ reason: String) -> [CacheMappingAssessment] {
             RegionCacheQuestion.allCases.map {
                 .init(question: $0, status: status, reason: reason, descriptor: nil, cacheValue: nil, valid: nil, binding: nil)
@@ -128,13 +142,16 @@ enum RegionCacheMapping {
             guard data.count >= 64 else { continue } // Bounded small constants cannot hold a descriptor.
             let name = section["name"] as! String
             for offset in stride(from: 0, through: data.count - 64, by: 8) {
-                // PAC stripping is a candidate comparison only. Never dereference
-                // this pointer and never equate a masked match with authentication.
-                let pointer = little(data, offset, 8) & 0x0000_FFFF_FFFF_FFFF
+                // The audited consumer loads the key as an ordinary data pointer.
+                // Compare dyld-resolved addresses exactly. Encoded disk pointers
+                // and unknown signed/tagged pointers require separate analysis;
+                // discarding their high bits cannot establish fixup correctness.
+                let pointer = little(data, offset, 8)
                 guard let key = hashes[pointer] else { continue }
                 let slot = Int(Int16(bitPattern: UInt16(little(data, offset + 0x3A, 2))))
                 let type = UInt32(little(data, offset + 0x3C, 4))
-                matches[key, default: []].append(.init(section: name, offset: offset, slot: slot, type: type))
+                matches[key, default: []].append(.init(section: name, offset: offset, slot: slot, type: type,
+                                                     flags: data[offset + 0x38]))
                 // Conflicting descriptors count even if their type is unexpected.
                 if slot >= 0 { owners[slot, default: []].insert(key) }
             }
@@ -142,6 +159,12 @@ enum RegionCacheMapping {
         let data = plist["CacheData"] as? Data
         let cacheUUID = (plist["CacheUUID"] as? String).flatMap(UUID.init(uuidString:))?.uuidString
         let count = data.map { $0.count / 9 } ?? 0
+        let runtimeImage = image["error"] == nil
+            && image["source"] as? String == "current process loaded image"
+            && image["pointerRepresentation"] as? String == "dyld-resolved key addresses"
+            && (image["cpuType"] as? NSNumber)?.uint32Value == 0x0100000C
+            && (((image["cpuSubtype"] as? NSNumber)?.uint32Value ?? 0) & 0x00FF_FFFF) == 2
+        let runningVersion = systemVersion ?? currentSystemVersion
         return RegionCacheQuestion.allCases.map { question in
             let candidates = matches[question.key] ?? []
             let descriptor = candidates.count == 1 ? candidates[0] : nil
@@ -170,18 +193,25 @@ enum RegionCacheMapping {
                           data[(descriptor.slot * 8 + 1)..<(descriptor.slot * 8 + 8)].allSatisfy({ $0 == 0 }) {
                     value = data[descriptor.slot * 8] == 1
                     flag = data[count * 8 + descriptor.slot]
-                    binding = .init(cacheUUID: cacheUUID!, version: build, byteCount: data.count)
+                    binding = .init(cacheUUID: cacheUUID!, version: build, byteCount: data.count,
+                                    productType: productType, cacheData: data)
                     status = .structurallyValid
                     reason = "64-byte/+0x3A/+0x3C hypothesis fits; UUID source and consumer instructions still require independent review."
                     let matching = reviews.filter {
                         $0.binaryUUID.uppercased() == binaryUUID.uppercased() && $0.cacheUUID.uppercased() == cacheUUID
                             && $0.build == build && $0.byteCount == data.count && $0.descriptors[question] == descriptor
-                            && !$0.evidence.isEmpty
+                            && !$0.evidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            && !$0.runtimeEvidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            && Set($0.descriptors.keys) == Set(RegionCacheQuestion.allCases)
+                            && Set($0.descriptors.values.map(\.slot)).count == RegionCacheQuestion.allCases.count
+                            && !productType.isEmpty && $0.productType == productType
+                            && $0.systemVersion == runningVersion && runtimeImage
                     }
                     if matching.count == 1 {
                         status = .binaryVerified
                         reason = "Reviewed binary semantics: \(matching[0].evidence)."
-                        if writeAccess { status = .writable }
+                        if flag != 1 { reason += " Target slot is invalid; query may recompute it. Mutation is blocked." }
+                        else if writeAccess { status = .writable }
                         else { reason += " Write access has not been established." }
                     }
                     if !(plist["CacheExtra"] is [String: Any]) {
@@ -205,17 +235,23 @@ enum RegionCacheMapping {
     }
 
     static func layout(for question: RegionCacheQuestion, assessments: [CacheMappingAssessment],
-                       plist: [String: Any]) throws -> JapanRegionCacheLayout {
+                       plist: [String: Any], productType: String) throws -> JapanRegionCacheLayout {
         guard let item = assessments.first(where: { $0.question == question }),
               assessments.filter({ $0.question == question }).count == 1,
               item.permitsMutation, let descriptor = item.descriptor, let binding = item.binding,
               let uuid = (plist["CacheUUID"] as? String).flatMap(UUID.init(uuidString:))?.uuidString,
               binding.cacheUUID == uuid, binding.version == plist["CacheVersion"] as? String,
-              let data = plist["CacheData"] as? Data, data.count == binding.byteCount,
+              !productType.isEmpty, binding.productType == productType,
+              let data = plist["CacheData"] as? Data, data.count == binding.byteCount, data == binding.cacheData,
               let extra = plist["CacheExtra"] as? [String: Any], extra[question.key] == nil, extra[question.rawValue] == nil else {
             throw JapanRegionError.unverifiedCacheSemantics
         }
-        return .init(size: data.count, slotCount: data.count / 9,
-                     fields: [.init(question: question.rawValue, slot: descriptor.slot, value: question.target)])
+        let layout = JapanRegionCacheLayout(size: data.count, slotCount: data.count / 9,
+            fields: [.init(question: question.rawValue, slot: descriptor.slot, value: question.target)])
+        try layout.validate(data)
+        guard descriptor.type == 11, data[layout.slotCount * 8 + descriptor.slot] == 1 else {
+            throw JapanRegionError.unverifiedCacheSemantics
+        }
+        return layout
     }
 }

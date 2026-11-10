@@ -233,7 +233,7 @@ enum RegionModuleMutation {
         var scope = RegionPatchScope()
         if let question = module.question {
             guard let data = root["CacheData"] as? Data else { throw JapanRegionError.missingCacheData }
-            let layout = try RegionCacheMapping.layout(for: question, assessments: assessments, plist: root)
+            let layout = try RegionCacheMapping.layout(for: question, assessments: assessments, plist: root, productType: productType)
             root["CacheData"] = try layout.applying(to: data)
             let slot = layout.fields[0].slot
             scope.byteOffsets = Array((slot * 8)..<(slot * 8 + 8)) + [layout.slotCount * 8 + slot]

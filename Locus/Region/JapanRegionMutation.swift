@@ -19,7 +19,7 @@ enum JapanRegionMutation {
         }
         let infoKey = try RegionModuleMutation.identityKey(.regionInfo, extra: extra)
         guard let info = extra[infoKey] as? String, !info.isEmpty else { throw JapanRegionError.invalidMobileGestalt }
-        _ = try JapanRegionCacheLayout.resolve(plist: plist, build: build)
+        _ = try JapanRegionCacheLayout.resolve(plist: plist, build: build, productType: profile.productType)
         guard JapanRegionProfile.verified(for: profile.productType) == profile else {
             throw JapanRegionError.unsupportedProductType(profile.productType)
         }
@@ -41,7 +41,7 @@ enum JapanRegionMutation {
         cacheExtra[try RegionModuleMutation.identityKey(.regionInfo, extra: cacheExtra)] = "J/A"
         cacheExtra[regulatoryModelKey] = profile.regulatoryModel
 
-        let layout = try JapanRegionCacheLayout.resolve(plist: plist, build: build)
+        let layout = try JapanRegionCacheLayout.resolve(plist: plist, build: build, productType: profile.productType)
         let updatedCacheData = try layout.applying(to: cacheData)
 
         var result = plist
@@ -57,7 +57,7 @@ enum JapanRegionMutation {
     ) -> Bool {
         guard let cacheExtra = plist["CacheExtra"] as? [String: Any],
               let cacheData = plist["CacheData"] as? Data,
-              let layout = try? JapanRegionCacheLayout.resolve(plist: plist, build: build),
+              let layout = try? JapanRegionCacheLayout.resolve(plist: plist, build: build, productType: profile.productType),
               cacheExtra[regionCodeKey] as? String == "J",
               let infoKey = try? RegionModuleMutation.identityKey(.regionInfo, extra: cacheExtra),
               cacheExtra[infoKey] as? String == "J/A",

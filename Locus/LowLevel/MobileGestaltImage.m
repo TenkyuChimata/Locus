@@ -4,7 +4,6 @@
 // Locus uses checked Mach VM reads, segment bounds and separate evidence levels.
 #import "MobileGestaltImage.h"
 #import <TargetConditionals.h>
-#import <dlfcn.h>
 #import <mach/mach.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
@@ -137,8 +136,10 @@ static NSDictionary *LocusSnapshotImage(NSString *path, BOOL includeSections)
     if (failure || offset != commands.length || uuidCount != 1)
         return @{@"error": failure ?: @"Missing/duplicate LC_UUID or unused command bytes."};
     return @{@"binaryUUID": uuid, @"path": path, @"sections": sections,
+             @"cpuType": @((uint32_t)header.cputype), @"cpuSubtype": @((uint32_t)header.cpusubtype),
              @"source": @"current process loaded image", @"slide": @(slide),
-             @"pointerComparison": @"48-bit candidate comparison only; PAC is not authenticated"};
+             @"pointerRepresentation": @"dyld-resolved key addresses",
+             @"pointerComparison": @"Exact key-address comparison; unknown PAC/tag/fixup forms rejected. No PAC authentication performed."};
 }
 
 NSDictionary<NSString *, id> *LocusLoadedImageIdentity(NSString *path)
@@ -151,10 +152,8 @@ NSDictionary<NSString *, id> *LocusCopyMobileGestaltImage(void)
 #if TARGET_OS_SIMULATOR
     return @{@"error": @"Device mapping is unavailable in Simulator."};
 #else
-    static void *handle;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ handle = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_LAZY | RTLD_LOCAL); });
-    if (!handle) return @{@"error": @"Could not load libMobileGestalt."};
+    // Observe an already loaded image only. dlopen could run initializers;
+    // a missing image is not permission to initialize a cache during a probe.
     return LocusSnapshotImage(@"/usr/lib/libMobileGestalt.dylib", YES);
 #endif
 }
