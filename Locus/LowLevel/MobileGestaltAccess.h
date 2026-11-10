@@ -3,7 +3,7 @@
 //  Locus
 //
 //  Focused low-level access to MobileGestalt. Runtime questions are always
-//  read-only. Persistent writes are hard-gated to the one verified build.
+//  read-only. Japan Region validates its data layout before persistent writes.
 //
 
 #import <Foundation/Foundation.h>
@@ -14,7 +14,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (instancetype)shared;
 + (NSString *)currentOSBuild;
-+ (BOOL)japanMutationBuildSupported;
 
 - (nullable NSDictionary *)readCachePlistWithError:(NSError **)error
     NS_SWIFT_NAME(readCachePlist());

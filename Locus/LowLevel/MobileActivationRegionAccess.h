@@ -16,6 +16,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (nullable NSData *)readRegionDataWithError:(NSError **)error
     NS_SWIFT_NAME(readRegionData());
+- (BOOL)validateRegionData:(NSData *)data error:(NSError **)error
+    NS_SWIFT_NAME(validateRegionData(_:));
 - (BOOL)applyJapanRegionWithError:(NSError **)error
     NS_SWIFT_NAME(applyJapanRegion());
 - (BOOL)restoreRegionData:(NSData *)data error:(NSError **)error

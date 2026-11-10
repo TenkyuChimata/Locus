@@ -7,8 +7,7 @@
 //
 
 #import "MobileActivationRegionAccess.h"
-#import "BadQueryBridge.h"
-#import "MobileGestaltAccess.h"
+#import "WorseQueryBridge.h"
 
 #import <dlfcn.h>
 #import <errno.h>
@@ -220,7 +219,7 @@ static NSString * _Nullable LocusResolveSystemGroupNormally(
 
     // Ensure libsystem_containermanager is loaded before resolving its private
     // symbol from RTLD_DEFAULT. This does not issue a container query.
-    (void)BadQueryBridgeAvailable();
+    (void)WorseQueryBridgeAvailable();
     dlerror();
     LocusSystemGroupResolver resolver =
         (LocusSystemGroupResolver)dlsym(
@@ -281,18 +280,19 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
         }
     }
 
-    if (!BadQueryBridgeAvailable()) {
+    NSString *configurationError = WorseQueryAccessConfigurationError();
+    if (configurationError) {
         if (error) {
             *error = LocusActivationError(
                 10,
-                @"bad_query is unavailable while resolving the MobileActivation SystemGroup."
+                configurationError
             );
         }
         return nil;
     }
 
     NSString *listDetail = nil;
-    NSArray<NSString *> *candidates = BadQueryListImmediateChildren(
+    NSArray<NSString *> *candidates = WorseQueryListImmediateChildren(
         LocusSystemGroupRoot,
         LocusSystemGroupInodeLimit,
         &listDetail
@@ -314,7 +314,7 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
         for (NSString *metadataName in @[LocusMetadataHidden, LocusMetadataPlain]) {
             NSString *leasePath = [candidate stringByAppendingPathComponent:metadataName];
             NSString *readPath = LocusPrivateVarPath(leasePath);
-            BadQueryLease *lease = [BadQueryLease leaseForPath:leasePath error:NULL];
+            WorseQueryLease *lease = [WorseQueryLease leaseForPath:candidate error:NULL];
             if (!lease) {
                 continue;
             }
@@ -355,7 +355,7 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
     return nil;
 }
 
-static BadQueryLease * _Nullable LocusAcquireRegionLease(
+static WorseQueryLease * _Nullable LocusAcquireRegionLease(
     NSString * _Nullable *readPathOut,
     NSError **error
 )
@@ -370,9 +370,12 @@ static BadQueryLease * _Nullable LocusAcquireRegionLease(
     NSString *leasePath = LocusLeaseAliasPath(candidate);
     NSString *readPath = LocusPrivateVarPath(leasePath);
     NSString *leaseDetail = nil;
-    BadQueryLease *lease = [BadQueryLease leaseForPath:leasePath
+    WorseQueryLease *lease = [WorseQueryLease leaseForPath:leasePath.stringByDeletingLastPathComponent
                                                  error:&leaseDetail];
     if (!lease) {
+        @synchronized (MobileActivationRegionAccess.class) {
+            LocusCachedActivationSystemGroupPath = nil;
+        }
         if (error) {
             *error = LocusActivationError(
                 13,
@@ -412,6 +415,38 @@ static NSDictionary * _Nullable LocusParsePlistData(
     return plist;
 }
 
+static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
+{
+    NSArray *families = @[LocusCountryKeys(), LocusRegionKeys(), LocusBehaviorKeys()];
+    for (NSArray *keys in families) {
+        NSUInteger count = 0;
+        for (NSString *key in keys) if (region[key]) count++;
+        if (count != 1 || ![LocusFirstValue(region, keys) isKindOfClass:NSString.class]) {
+            if (error) *error = LocusActivationError(24, @"Unsupported MobileActivation schema: require one existing string field for country, region and SoftwareBehaviors; ambiguous aliases are refused.");
+            return NO;
+        }
+    }
+    NSString *country = LocusFirstValue(region, LocusCountryKeys());
+    NSString *info = LocusFirstValue(region, LocusRegionKeys());
+    NSString *behavior = LocusFirstValue(region, LocusBehaviorKeys());
+    BOOL countryValid = [country rangeOfString:@"^[A-Z]{2}$" options:NSRegularExpressionSearch].location != NSNotFound;
+    BOOL infoValid = [info rangeOfString:@"^[A-Z0-9]{1,4}/[A-Z]$" options:NSRegularExpressionSearch].location != NSNotFound;
+    BOOL hexadecimal = [behavior hasPrefix:@"0x"] || [behavior hasPrefix:@"0X"];
+    NSString *digits = hexadecimal ? [behavior substringFromIndex:2] : behavior;
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:hexadecimal ? @"0123456789abcdefABCDEF" : @"0123456789"];
+    unsigned long long number = 0;
+    NSScanner *scanner = [NSScanner scannerWithString:digits];
+    BOOL parsed = hexadecimal ? [scanner scanHexLongLong:&number] : [scanner scanUnsignedLongLong:&number];
+    if (!countryValid || !infoValid || !digits.length ||
+        [digits rangeOfCharacterFromSet:allowed.invertedSet].location != NSNotFound ||
+        !parsed || !scanner.isAtEnd || number > UINT32_MAX) {
+        if (error) *error = LocusActivationError(24, @"Unsupported MobileActivation field semantics: expected country code, region code and a UInt32 string for SoftwareBehaviors.");
+        return NO;
+    }
+    if (error) *error = nil;
+    return YES;
+}
+
 @implementation MobileActivationRegionAccess
 
 + (instancetype)shared
@@ -426,281 +461,286 @@ static NSDictionary * _Nullable LocusParsePlistData(
 
 - (NSData *)readRegionDataWithError:(NSError **)error
 {
-    NSString *readPath = nil;
-    BadQueryLease *lease = LocusAcquireRegionLease(&readPath, error);
-    if (!lease) {
-        return nil;
-    }
-
-    @try {
-        NSError *readError = nil;
-        NSData *data = [NSData dataWithContentsOfFile:readPath
-                                              options:NSDataReadingMappedIfSafe
-                                                error:&readError];
-        if (!data) {
-            if (error) {
-                *error = readError ?: LocusActivationError(
-                    20,
-                    @"Failed to read region_info.plist."
-                );
-            }
+    @synchronized (self) {
+        NSString *readPath = nil;
+        WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, error);
+        if (!lease) {
             return nil;
         }
-        if (error) {
-            *error = nil;
-        }
-        return [NSData dataWithData:data];
-    } @finally {
-        [lease invalidate];
-    }
-}
 
-- (BOOL)applyJapanRegionWithError:(NSError **)error
-{
-    if (![MobileGestaltAccess japanMutationBuildSupported]) {
-        if (error) {
-            *error = LocusActivationError(
-                21,
-                @"MobileActivation Japan mutation is disabled outside exact build 24A5390f."
-            );
-        }
-        return NO;
-    }
-
-    NSString *readPath = nil;
-    BadQueryLease *lease = LocusAcquireRegionLease(&readPath, error);
-    if (!lease) {
-        return NO;
-    }
-
-    @try {
-        NSData *original = [NSData dataWithContentsOfFile:readPath];
-        if (!original) {
-            if (error) {
-                *error = LocusActivationError(22, @"Failed to read region_info.plist before mutation.");
-            }
-            return NO;
-        }
-
-        NSPropertyListFormat format = NSPropertyListBinaryFormat_v1_0;
-        NSError *parseError = nil;
-        NSDictionary *parsed = LocusParsePlistData(
-            original,
-            NSPropertyListMutableContainers,
-            &format,
-            &parseError
-        );
-        if (!parsed) {
-            if (error) {
-                *error = parseError ?: LocusActivationError(23, @"region_info.plist is not a dictionary.");
-            }
-            return NO;
-        }
-
-        NSMutableDictionary *region = [parsed mutableCopy];
-        NSString *countryKey = LocusExistingKey(region, LocusCountryKeys());
-        NSString *regionKey = LocusExistingKey(region, LocusRegionKeys());
-        NSString *behaviorKey = LocusExistingKey(region, LocusBehaviorKeys());
-        if (!countryKey || !regionKey || !behaviorKey) {
-            if (error) {
-                *error = LocusActivationError(
-                    24,
-                    [NSString stringWithFormat:
-                        @"Unexpected region_info.plist schema; existing keys: %@",
-                        [[region allKeys] componentsJoinedByString:@", "]]
-                );
-            }
-            return NO;
-        }
-
-        region[countryKey] = @"JP";
-        region[regionKey] = @"J/A";
-        // MobileGestaltExtensions validates this value as CFString.
-        region[behaviorKey] = @"25";
-
-        if (format != NSPropertyListXMLFormat_v1_0 &&
-            format != NSPropertyListBinaryFormat_v1_0) {
-            format = NSPropertyListBinaryFormat_v1_0;
-        }
-        NSError *serializationError = nil;
-        NSData *updated = [NSPropertyListSerialization
-            dataWithPropertyList:region
-                          format:format
-                         options:0
-                           error:&serializationError];
-        if (!updated) {
-            if (error) {
-                *error = serializationError ?: LocusActivationError(25, @"Failed to serialize region_info.plist.");
-            }
-            return NO;
-        }
-
-        if (!LocusRewriteExistingActivationFile(readPath, updated, 30, error)) {
-            return NO;
-        }
-
-        NSData *verificationData = [NSData dataWithContentsOfFile:readPath];
-        NSDictionary *verification = verificationData
-            ? LocusParsePlistData(verificationData, 0, NULL, NULL)
-            : nil;
-        BOOL valid = verification.count > 0 &&
-            [LocusFirstValue(verification, LocusCountryKeys()) isEqual:@"JP"] &&
-            [LocusFirstValue(verification, LocusRegionKeys()) isEqual:@"J/A"] &&
-            [LocusFirstValue(verification, LocusBehaviorKeys()) isEqual:@"25"];
-        if (!valid) {
-            if (error) {
-                *error = LocusActivationError(34, @"Japan region_info.plist verification failed.");
-            }
-            return NO;
-        }
-
-        if (error) {
-            *error = nil;
-        }
-        return YES;
-    } @finally {
-        [lease invalidate];
-    }
-}
-
-- (BOOL)restoreRegionData:(NSData *)data error:(NSError **)error
-{
-    if (![MobileGestaltAccess japanMutationBuildSupported]) {
-        if (error) {
-            *error = LocusActivationError(
-                40,
-                @"MobileActivation restore is disabled outside exact build 24A5390f."
-            );
-        }
-        return NO;
-    }
-    if (![data isKindOfClass:NSData.class] || data.length == 0) {
-        if (error) {
-            *error = LocusActivationError(41, @"The MobileActivation backup is empty.");
-        }
-        return NO;
-    }
-
-    NSString *readPath = nil;
-    BadQueryLease *lease = LocusAcquireRegionLease(&readPath, error);
-    if (!lease) {
-        return NO;
-    }
-    @try {
-        return LocusRewriteExistingActivationFile(readPath, data, 42, error);
-    } @finally {
-        [lease invalidate];
-    }
-}
-
-- (NSDictionary<NSString *, id> *)regionDiagnostics
-{
-    NSMutableDictionary<NSString *, id> *result = [NSMutableDictionary dictionary];
-
-    NSNumber *resolverStatus = nil;
-    NSString *resolverDetail = nil;
-    NSString *normalGroupPath = LocusResolveSystemGroupNormally(
-        &resolverStatus,
-        &resolverDetail
-    );
-    result[@"resolverSucceeded"] = @(normalGroupPath.length > 0);
-    result[@"resolverStatus"] = resolverStatus ?: NSNull.null;
-    result[@"resolverDetail"] = resolverDetail ?: NSNull.null;
-
-    NSString *readPath = nil;
-    NSError *leaseError = nil;
-    BadQueryLease *lease = LocusAcquireRegionLease(&readPath, &leaseError);
-    result[@"resolvedBackingPath"] = readPath ?: NSNull.null;
-    result[@"backingReadSucceeded"] = @NO;
-    result[@"backingReadError"] = leaseError.localizedDescription ?: NSNull.null;
-    result[@"backingCountryCode"] = NSNull.null;
-    result[@"backingRegionInfo"] = NSNull.null;
-    result[@"backingSoftwareBehaviors"] = NSNull.null;
-
-    if (lease) {
         @try {
             NSError *readError = nil;
             NSData *data = [NSData dataWithContentsOfFile:readPath
                                                   options:NSDataReadingMappedIfSafe
                                                     error:&readError];
-            NSDictionary *backing = data
-                ? LocusParsePlistData(data, 0, NULL, &readError)
-                : nil;
-            if (backing) {
-                result[@"backingReadSucceeded"] = @YES;
-                result[@"backingReadError"] = NSNull.null;
-                result[@"backingCountryCode"] =
-                    LocusFirstValue(backing, LocusCountryKeys()) ?: NSNull.null;
-                result[@"backingRegionInfo"] =
-                    LocusFirstValue(backing, LocusRegionKeys()) ?: NSNull.null;
-                result[@"backingSoftwareBehaviors"] =
-                    LocusFirstValue(backing, LocusBehaviorKeys()) ?: NSNull.null;
-            } else {
-                result[@"backingReadError"] =
-                    readError.localizedDescription ?: @"Could not parse the backing plist.";
+            if (!data) {
+                if (error) {
+                    *error = readError ?: LocusActivationError(
+                        20,
+                        @"Failed to read region_info.plist."
+                    );
+                }
+                return nil;
             }
+            if (error) {
+                *error = nil;
+            }
+            return [NSData dataWithData:data];
         } @finally {
             [lease invalidate];
         }
     }
+}
 
-    result[@"effectiveCallSucceeded"] = @NO;
-    result[@"effectiveCountryCode"] = NSNull.null;
-    result[@"effectiveRegionInfo"] = NSNull.null;
-    result[@"effectiveSoftwareBehaviors"] = NSNull.null;
-    result[@"effectiveErrorDomain"] = NSNull.null;
-    result[@"effectiveErrorCode"] = NSNull.null;
-    result[@"effectiveErrorDescription"] = NSNull.null;
+- (BOOL)applyJapanRegionWithError:(NSError **)error
+{
+    @synchronized (self) {
+        NSString *readPath = nil;
+        WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, error);
+        if (!lease) {
+            return NO;
+        }
 
-    void *handle = dlopen(LocusActivationFramework.fileSystemRepresentation,
-                          RTLD_LAZY | RTLD_LOCAL);
-    if (!handle) {
-        result[@"effectiveErrorDescription"] = [NSString stringWithFormat:
-            @"Could not load MobileActivation: %s", dlerror() ?: "unknown error"];
-        return [result copy];
+        @try {
+            NSData *original = [NSData dataWithContentsOfFile:readPath];
+            if (!original) {
+                if (error) {
+                    *error = LocusActivationError(22, @"Failed to read region_info.plist before mutation.");
+                }
+                return NO;
+            }
+
+            NSPropertyListFormat format = NSPropertyListBinaryFormat_v1_0;
+            NSError *parseError = nil;
+            NSDictionary *parsed = LocusParsePlistData(
+                original,
+                NSPropertyListMutableContainers,
+                &format,
+                &parseError
+            );
+            if (!parsed) {
+                if (error) {
+                    *error = parseError ?: LocusActivationError(23, @"region_info.plist is not a dictionary.");
+                }
+                return NO;
+            }
+
+            if (!LocusValidateRegionSchema(parsed, error)) return NO;
+            NSMutableDictionary *region = [parsed mutableCopy];
+            NSString *countryKey = LocusExistingKey(region, LocusCountryKeys());
+            NSString *regionKey = LocusExistingKey(region, LocusRegionKeys());
+            NSString *behaviorKey = LocusExistingKey(region, LocusBehaviorKeys());
+            if (!countryKey || !regionKey || !behaviorKey) {
+                if (error) {
+                    *error = LocusActivationError(
+                        24,
+                        [NSString stringWithFormat:
+                            @"Unexpected region_info.plist schema; existing keys: %@",
+                            [[region allKeys] componentsJoinedByString:@", "]]
+                    );
+                }
+                return NO;
+            }
+
+            region[countryKey] = @"JP";
+            region[regionKey] = @"J/A";
+            // MobileGestaltExtensions validates this value as CFString.
+            region[behaviorKey] = @"25";
+
+            if (format != NSPropertyListXMLFormat_v1_0 &&
+                format != NSPropertyListBinaryFormat_v1_0) {
+                format = NSPropertyListBinaryFormat_v1_0;
+            }
+            NSError *serializationError = nil;
+            NSData *updated = [NSPropertyListSerialization
+                dataWithPropertyList:region
+                              format:format
+                             options:0
+                               error:&serializationError];
+            if (!updated) {
+                if (error) {
+                    *error = serializationError ?: LocusActivationError(25, @"Failed to serialize region_info.plist.");
+                }
+                return NO;
+            }
+
+            if (!LocusRewriteExistingActivationFile(readPath, updated, 30, error)) {
+                return NO;
+            }
+
+            NSData *verificationData = [NSData dataWithContentsOfFile:readPath];
+            NSDictionary *verification = verificationData
+                ? LocusParsePlistData(verificationData, 0, NULL, NULL)
+                : nil;
+            BOOL valid = verification.count > 0 &&
+                [LocusFirstValue(verification, LocusCountryKeys()) isEqual:@"JP"] &&
+                [LocusFirstValue(verification, LocusRegionKeys()) isEqual:@"J/A"] &&
+                [LocusFirstValue(verification, LocusBehaviorKeys()) isEqual:@"25"];
+            if (!valid) {
+                if (error) {
+                    *error = LocusActivationError(34, @"Japan region_info.plist verification failed.");
+                }
+                return NO;
+            }
+
+            if (error) {
+                *error = nil;
+            }
+            return YES;
+        } @finally {
+            [lease invalidate];
+        }
     }
+}
 
-    LocusCopyDeviceRegionInfo copyRegion =
-        (LocusCopyDeviceRegionInfo)dlsym(handle, "MAECopyDeviceRegionInfoWithError");
-    NSString * const *countryKey =
-        (NSString * const *)dlsym(handle, "kMADeviceRegionCountryCode");
-    NSString * const *regionKey =
-        (NSString * const *)dlsym(handle, "kMADeviceRegionRegionInfo");
-    NSString * const *behaviorKey =
-        (NSString * const *)dlsym(handle, "kMADeviceRegionSoftwareBehaviors");
-    if (!copyRegion || !countryKey || !*countryKey ||
-        !regionKey || !*regionKey || !behaviorKey || !*behaviorKey) {
-        result[@"effectiveErrorDescription"] =
-            @"Required MobileActivation device-region symbols are unavailable.";
+- (BOOL)restoreRegionData:(NSData *)data error:(NSError **)error
+{
+    @synchronized (self) {
+        if (![data isKindOfClass:NSData.class] || data.length == 0) {
+            if (error) {
+                *error = LocusActivationError(41, @"The MobileActivation backup is empty.");
+            }
+            return NO;
+        }
+
+        NSString *readPath = nil;
+        WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, error);
+        if (!lease) {
+            return NO;
+        }
+        @try {
+            return LocusRewriteExistingActivationFile(readPath, data, 42, error);
+        } @finally {
+            [lease invalidate];
+        }
+    }
+}
+
+- (BOOL)validateRegionData:(NSData *)data error:(NSError **)error
+{
+    NSDictionary *region = LocusParsePlistData(data, 0, NULL, error);
+    if (!region) {
+        if (error && !*error) *error = LocusActivationError(23, @"region_info.plist is not a dictionary.");
+        return NO;
+    }
+    return LocusValidateRegionSchema(region, error);
+}
+
+- (NSDictionary<NSString *, id> *)regionDiagnostics
+{
+    @synchronized (self) {
+        NSMutableDictionary<NSString *, id> *result = [NSMutableDictionary dictionary];
+
+        NSNumber *resolverStatus = nil;
+        NSString *resolverDetail = nil;
+        NSString *normalGroupPath = LocusResolveSystemGroupNormally(
+            &resolverStatus,
+            &resolverDetail
+        );
+        result[@"resolverSucceeded"] = @(normalGroupPath.length > 0);
+        result[@"resolverStatus"] = resolverStatus ?: NSNull.null;
+        result[@"resolverDetail"] = resolverDetail ?: NSNull.null;
+
+        NSString *readPath = nil;
+        NSError *leaseError = nil;
+        WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, &leaseError);
+        result[@"resolvedBackingPath"] = readPath ?: NSNull.null;
+        result[@"backingReadSucceeded"] = @NO;
+        result[@"backingReadError"] = leaseError.localizedDescription ?: NSNull.null;
+        result[@"backingCountryCode"] = NSNull.null;
+        result[@"backingRegionInfo"] = NSNull.null;
+        result[@"backingSoftwareBehaviors"] = NSNull.null;
+        result[@"mutationSchemaSupported"] = @NO;
+        result[@"mutationSchemaError"] = leaseError.localizedDescription ?: @"Backing data unavailable.";
+
+        if (lease) {
+            @try {
+                NSError *readError = nil;
+                NSData *data = [NSData dataWithContentsOfFile:readPath
+                                                      options:NSDataReadingMappedIfSafe
+                                                        error:&readError];
+                NSDictionary *backing = data
+                    ? LocusParsePlistData(data, 0, NULL, &readError)
+                    : nil;
+                if (backing) {
+                    NSError *schemaError = nil;
+                    result[@"mutationSchemaSupported"] = @(LocusValidateRegionSchema(backing, &schemaError));
+                    result[@"mutationSchemaError"] = schemaError.localizedDescription ?: NSNull.null;
+                    result[@"backingReadSucceeded"] = @YES;
+                    result[@"backingReadError"] = NSNull.null;
+                    result[@"backingCountryCode"] =
+                        LocusFirstValue(backing, LocusCountryKeys()) ?: NSNull.null;
+                    result[@"backingRegionInfo"] =
+                        LocusFirstValue(backing, LocusRegionKeys()) ?: NSNull.null;
+                    result[@"backingSoftwareBehaviors"] =
+                        LocusFirstValue(backing, LocusBehaviorKeys()) ?: NSNull.null;
+                } else {
+                    result[@"backingReadError"] =
+                        readError.localizedDescription ?: @"Could not parse the backing plist.";
+                }
+            } @finally {
+                [lease invalidate];
+            }
+        }
+
+        result[@"effectiveCallSucceeded"] = @NO;
+        result[@"effectiveCountryCode"] = NSNull.null;
+        result[@"effectiveRegionInfo"] = NSNull.null;
+        result[@"effectiveSoftwareBehaviors"] = NSNull.null;
+        result[@"effectiveErrorDomain"] = NSNull.null;
+        result[@"effectiveErrorCode"] = NSNull.null;
+        result[@"effectiveErrorDescription"] = NSNull.null;
+
+        void *handle = dlopen(LocusActivationFramework.fileSystemRepresentation,
+                              RTLD_LAZY | RTLD_LOCAL);
+        if (!handle) {
+            result[@"effectiveErrorDescription"] = [NSString stringWithFormat:
+                @"Could not load MobileActivation: %s", dlerror() ?: "unknown error"];
+            return [result copy];
+        }
+
+        LocusCopyDeviceRegionInfo copyRegion =
+            (LocusCopyDeviceRegionInfo)dlsym(handle, "MAECopyDeviceRegionInfoWithError");
+        NSString * const *countryKey =
+            (NSString * const *)dlsym(handle, "kMADeviceRegionCountryCode");
+        NSString * const *regionKey =
+            (NSString * const *)dlsym(handle, "kMADeviceRegionRegionInfo");
+        NSString * const *behaviorKey =
+            (NSString * const *)dlsym(handle, "kMADeviceRegionSoftwareBehaviors");
+        if (!copyRegion || !countryKey || !*countryKey ||
+            !regionKey || !*regionKey || !behaviorKey || !*behaviorKey) {
+            result[@"effectiveErrorDescription"] =
+                @"Required MobileActivation device-region symbols are unavailable.";
+            dlclose(handle);
+            return [result copy];
+        }
+
+        CFErrorRef apiErrorRef = NULL;
+        CFDictionaryRef dictionaryRef = copyRegion(&apiErrorRef);
+        NSError *apiError = apiErrorRef ? (__bridge NSError *)apiErrorRef : nil;
+        if (dictionaryRef && CFGetTypeID(dictionaryRef) == CFDictionaryGetTypeID()) {
+            NSDictionary *dictionary = (__bridge NSDictionary *)dictionaryRef;
+            result[@"effectiveCallSucceeded"] = @YES;
+            result[@"effectiveCountryCode"] = dictionary[*countryKey] ?: NSNull.null;
+            result[@"effectiveRegionInfo"] = dictionary[*regionKey] ?: NSNull.null;
+            result[@"effectiveSoftwareBehaviors"] = dictionary[*behaviorKey] ?: NSNull.null;
+        }
+        if (apiError) {
+            result[@"effectiveErrorDomain"] = apiError.domain ?: NSNull.null;
+            result[@"effectiveErrorCode"] = @(apiError.code);
+            result[@"effectiveErrorDescription"] =
+                apiError.localizedDescription ?: NSNull.null;
+        }
+
+        if (dictionaryRef) {
+            CFRelease(dictionaryRef);
+        }
+        // The ownership of this private out-error is not independently known;
+        // match the verified implementation and do not release apiErrorRef.
         dlclose(handle);
+
         return [result copy];
     }
-
-    CFErrorRef apiErrorRef = NULL;
-    CFDictionaryRef dictionaryRef = copyRegion(&apiErrorRef);
-    NSError *apiError = apiErrorRef ? (__bridge NSError *)apiErrorRef : nil;
-    if (dictionaryRef && CFGetTypeID(dictionaryRef) == CFDictionaryGetTypeID()) {
-        NSDictionary *dictionary = (__bridge NSDictionary *)dictionaryRef;
-        result[@"effectiveCallSucceeded"] = @YES;
-        result[@"effectiveCountryCode"] = dictionary[*countryKey] ?: NSNull.null;
-        result[@"effectiveRegionInfo"] = dictionary[*regionKey] ?: NSNull.null;
-        result[@"effectiveSoftwareBehaviors"] = dictionary[*behaviorKey] ?: NSNull.null;
-    }
-    if (apiError) {
-        result[@"effectiveErrorDomain"] = apiError.domain ?: NSNull.null;
-        result[@"effectiveErrorCode"] = @(apiError.code);
-        result[@"effectiveErrorDescription"] =
-            apiError.localizedDescription ?: NSNull.null;
-    }
-
-    if (dictionaryRef) {
-        CFRelease(dictionaryRef);
-    }
-    // The ownership of this private out-error is not independently known;
-    // match the verified implementation and do not release apiErrorRef.
-    dlclose(handle);
-
-    return [result copy];
 }
 
 @end

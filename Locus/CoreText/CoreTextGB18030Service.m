@@ -2,7 +2,7 @@
 //  CoreTextGB18030Service.m
 //  Locus
 //
-//  Process-local validation of the 24A5390f CoreText GB18030 predicate.
+//  Process-local CoreText GB18030 experiment with independent binary validation.
 //
 
 #import "CoreTextGB18030Service.h"
@@ -26,7 +26,8 @@
 // dispatch_once token:                0x1E6E72E50 (int64_t)
 //
 // Both globals are in CoreText __DATA_DIRTY.__bss on this exact build.
-// Never reuse these constants on another build without re-deriving them.
+// These constants are never used until the loaded binary identity is reviewed.
+// No reviewed CoreText UUID was supplied by the inherited implementation.
 // -------------------------------------------------------------------------
 static const uintptr_t kGECoreTextStaticImageBase =
     UINT64_C(0x19AA02000);
@@ -36,8 +37,6 @@ static const uintptr_t kGECoreTextGB18030CachedBoolStaticAddress =
 
 static const uintptr_t kGECoreTextGB18030OnceStaticAddress =
     UINT64_C(0x1E6E72E50);
-
-static NSString * const kGECoreTextSupportedBuild = @"24A5390f";
 
 static NSString * const kGECoreTextImageSuffix =
     @"/System/Library/Frameworks/CoreText.framework/CoreText";
@@ -165,6 +164,35 @@ GEFindLoadedCoreTextImage(
     return NO;
 }
 
+static NSString *GECoreTextImageUUID(const struct mach_header_64 *header)
+{
+    if (!header || header->magic != MH_MAGIC_64 ||
+        header->ncmds > header->sizeofcmds / sizeof(struct load_command)) return nil;
+    const uint8_t *cursor = (const uint8_t *)(header + 1);
+    const uint8_t *end = cursor + header->sizeofcmds;
+    for (uint32_t i = 0; i < header->ncmds; i++) {
+        if ((size_t)(end - cursor) < sizeof(struct load_command)) return nil;
+        const struct load_command *command = (const struct load_command *)cursor;
+        if (command->cmdsize < sizeof(*command) || command->cmdsize > (size_t)(end - cursor)) return nil;
+        if (command->cmd == LC_UUID && command->cmdsize == sizeof(struct uuid_command)) {
+            const struct uuid_command *uuid = (const struct uuid_command *)command;
+            return [[NSUUID alloc] initWithUUIDBytes:uuid->uuid].UUIDString;
+        }
+        cursor += command->cmdsize;
+    }
+    return nil;
+}
+
+static BOOL GECoreTextBinaryReviewed(const struct mach_header_64 *header)
+{
+    // A review must identify the predicate's actual instructions and both data
+    // references in this binary before registering its UUID. The old source had
+    // only virtual addresses and a build string, which cannot establish this.
+    NSSet<NSString *> *reviewedUUIDs = [NSSet set];
+    NSString *uuid = GECoreTextImageUUID(header);
+    return uuid && [reviewedUUIDs containsObject:uuid];
+}
+
 static BOOL
 GEFindStaticSectionContainingAddress(
     const struct mach_header_64 *header,
@@ -182,13 +210,18 @@ GEFindStaticSectionContainingAddress(
     const uint8_t *cursor =
         (const uint8_t *)header + sizeof(struct mach_header_64);
 
+    const uint8_t *commandsEnd = cursor + header->sizeofcmds;
+    if (header->ncmds > header->sizeofcmds / sizeof(struct load_command)) return NO;
+
     for (uint32_t commandIndex = 0;
          commandIndex < header->ncmds;
          commandIndex++) {
+        if ((size_t)(commandsEnd - cursor) < sizeof(struct load_command)) return NO;
         const struct load_command *command =
             (const struct load_command *)cursor;
 
-        if (command->cmdsize < sizeof(struct load_command)) {
+        if (command->cmdsize < sizeof(struct load_command) ||
+            command->cmdsize > (size_t)(commandsEnd - cursor)) {
             return NO;
         }
 
@@ -405,6 +438,12 @@ GEValidatedRuntimeAddresses(
         return NO;
     }
 
+    if (!GECoreTextBinaryReviewed(header)) {
+        if (error) *error = GECoreTextError(17,
+            [NSString stringWithFormat:@"CoreText binary %@ has no reviewed GB18030 instruction/data-reference fingerprint. This experiment is disabled; Japan Region and Diagnostics are independent.", GECoreTextImageUUID(header) ?: @"<missing UUID>"]);
+        return NO;
+    }
+
     uintptr_t expectedHeaderAddress =
         (uintptr_t)((intptr_t)kGECoreTextStaticImageBase + slide);
 
@@ -482,13 +521,17 @@ GEValidatedRuntimeAddresses(
     }
 
     vm_prot_t onceProtection = VM_PROT_NONE;
+    uintptr_t onceRegionStart = 0;
+    uint64_t onceRegionSize = 0;
 
     if (!GERegionInfoForAddress(
             onceAddress,
             &onceProtection,
             NULL,
-            NULL,
-            NULL)) {
+            &onceRegionStart,
+            &onceRegionSize) ||
+        onceAddress - onceRegionStart > onceRegionSize ||
+        sizeof(int64_t) > onceRegionSize - (onceAddress - onceRegionStart)) {
         if (error) {
             *error = GECoreTextError(
                 14,
@@ -620,8 +663,6 @@ GERenderEmojiSample(CGFloat fontSize)
 + (NSDictionary<NSString *, id> *)probeWithError:(NSError **)error
 {
     NSString *build = GECurrentOSBuild();
-    BOOL buildSupported =
-        [build isEqualToString:kGECoreTextSupportedBuild];
 
     const struct mach_header_64 *header = NULL;
     intptr_t slide = 0;
@@ -637,7 +678,8 @@ GERenderEmojiSample(CGFloat fontSize)
     NSMutableDictionary<NSString *, id> *result =
         [NSMutableDictionary dictionaryWithDictionary:@{
             @"build": build,
-            @"buildSupported": @(buildSupported),
+            @"binarySupported": @(GECoreTextBinaryReviewed(header)),
+            @"imageUUID": GECoreTextImageUUID(header) ?: NSNull.null,
             @"coreTextLoaded": @(loaded),
             @"imageName": imageName ?: NSNull.null,
             @"headerAddress": header
@@ -652,7 +694,7 @@ GERenderEmojiSample(CGFloat fontSize)
     [result addEntriesFromDictionary:
         GESharedCacheDiagnostics(header)];
 
-    if (!buildSupported || !loaded) {
+    if (!loaded) {
         result[@"addressValidationAvailable"] = @NO;
 
         if (error) {
@@ -729,22 +771,6 @@ GERenderEmojiSample(CGFloat fontSize)
             *error = GECoreTextError(
                 20,
                 @"The CoreText rendering experiment must run on the main thread."
-            );
-        }
-        return nil;
-    }
-
-    NSString *build = GECurrentOSBuild();
-
-    if (![build isEqualToString:kGECoreTextSupportedBuild]) {
-        if (error) {
-            *error = GECoreTextError(
-                21,
-                [NSString stringWithFormat:
-                    @"This experiment is hard-gated to %@. Current build: %@.",
-                    kGECoreTextSupportedBuild,
-                    build.length > 0 ? build : @"<unknown>"
-                ]
             );
         }
         return nil;

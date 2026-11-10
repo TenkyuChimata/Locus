@@ -18,7 +18,7 @@ struct RegionIdentitySnapshot {
     let activationCountry: String
     let activationRegion: String
     let activationBehaviors: String
-    let exactBuildSupported: Bool
+    let layoutSupported: Bool
     let mutationPathReady: Bool
     let configurationState: RegionConfigurationState
     let readinessDetail: String
@@ -51,7 +51,7 @@ final class RegionIdentityService: ObservableObject {
             }
             let cacheExtra = plist["CacheExtra"] as? [String: Any]
             let activationDiagnostics = activation.regionDiagnostics()
-            let exactBuild = build == JapanRegionMutation.verifiedBuild
+            let layoutSupported = (try? JapanRegionCacheLayout.resolve(plist: plist, build: build)) != nil
             let configurationState = classifyConfiguration(
                 plist: plist,
                 cacheExtra: cacheExtra,
@@ -69,11 +69,11 @@ final class RegionIdentityService: ObservableObject {
                         profile: profile,
                         build: build
                     )
-                    if (activationDiagnostics["backingReadSucceeded"] as? NSNumber)?.boolValue == true {
+                    if (activationDiagnostics["mutationSchemaSupported"] as? NSNumber)?.boolValue == true {
                         ready = true
                     } else {
-                        readiness = "MobileActivation backing data is unavailable: "
-                            + display(activationDiagnostics["backingReadError"])
+                        readiness = "MobileActivation mutation schema is unavailable: "
+                            + display(activationDiagnostics["mutationSchemaError"])
                     }
                 } catch {
                     readiness = error.localizedDescription
@@ -99,7 +99,7 @@ final class RegionIdentityService: ObservableObject {
                 activationCountry: display(activationDiagnostics["backingCountryCode"]),
                 activationRegion: display(activationDiagnostics["backingRegionInfo"]),
                 activationBehaviors: display(activationDiagnostics["backingSoftwareBehaviors"]),
-                exactBuildSupported: exactBuild,
+                layoutSupported: layoutSupported,
                 mutationPathReady: ready,
                 configurationState: configurationState,
                 readinessDetail: readiness
@@ -115,7 +115,7 @@ final class RegionIdentityService: ObservableObject {
                 activationCountry: "<unavailable>",
                 activationRegion: "<unavailable>",
                 activationBehaviors: "<unavailable>",
-                exactBuildSupported: build == JapanRegionMutation.verifiedBuild,
+                layoutSupported: false,
                 mutationPathReady: false,
                 configurationState: .unavailable,
                 readinessDetail: error.localizedDescription
@@ -142,9 +142,6 @@ final class RegionIdentityService: ObservableObject {
             guard let profile = JapanRegionProfile.verified(for: productType) else {
                 throw JapanRegionError.unsupportedProductType(productType)
             }
-            guard build == JapanRegionMutation.verifiedBuild else {
-                throw JapanRegionError.unsupportedBuild(build)
-            }
 
             // Both exact source backups are durably created before either
             // persistent file is modified.
@@ -154,6 +151,7 @@ final class RegionIdentityService: ObservableObject {
             try transactionBackup.saveMobileGestalt(gestaltData)
 
             let activationData = try activation.readRegionData()
+            try activation.validateRegionData(activationData)
             originalActivation = activationData
             try transactionBackup.saveMobileActivation(activationData)
 
@@ -280,6 +278,12 @@ final class RegionIdentityService: ObservableObject {
         }
 
         let activationMatches = activationIsJapan(activationDiagnostics)
+        let mobileGestaltMatches = cacheExtra[JapanRegionMutation.regionCodeKey] as? String == "J"
+            && cacheExtra[JapanRegionMutation.regionInfoKey] as? String == "J/A"
+        if mobileGestaltMatches && activationMatches,
+           (try? JapanRegionCacheLayout.resolve(plist: plist, build: build)) == nil {
+            return .japanLikeUnverified
+        }
         if let profile {
             return JapanRegionMutation.isApplied(
                 to: plist,
@@ -288,8 +292,6 @@ final class RegionIdentityService: ObservableObject {
             ) && activationMatches ? .verified : .notApplied
         }
 
-        let mobileGestaltMatches = cacheExtra[JapanRegionMutation.regionCodeKey] as? String == "J"
-            && cacheExtra[JapanRegionMutation.regionInfoKey] as? String == "J/A"
         return mobileGestaltMatches && activationMatches
             ? .japanLikeUnverified
             : .notApplied

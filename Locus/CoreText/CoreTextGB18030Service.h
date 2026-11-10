@@ -2,8 +2,8 @@
 //  CoreTextGB18030Service.h
 //  Locus
 //
-//  Exact-build, process-local CoreText diagnostics for iOS/iPadOS 27
-//  build 24A5390f.
+//  Process-local CoreText diagnostics; mutation requires a separately
+//  verified loaded CoreText binary.
 //
 //  This helper never edits a system file, never calls mprotect/vm_protect,
 //  and never writes CoreText's dispatch_once token. The mutation experiment
@@ -17,13 +17,13 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface CoreTextGB18030Service : NSObject
 
-/// Read-only inspection of the loaded CoreText image and the exact-build
+/// Read-only inspection of the loaded CoreText image and the verified
 /// GB18030 cached predicate state.
 + (nullable NSDictionary<NSString *, id> *)probeWithError:
     (NSError * _Nullable * _Nullable)error
     NS_SWIFT_NAME(probe());
 
-/// Exact-build experiment for 24A5390f.
+/// Experiment requiring a reviewed CoreText binary fingerprint.
 ///
 /// The method:
 /// 1. validates CoreText's loaded-image base/slide and __DATA_DIRTY.__bss;

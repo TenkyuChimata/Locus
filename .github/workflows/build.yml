@@ -7,8 +7,18 @@ on:
       - main
 
 jobs:
+  portable-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: sh Scripts/test-portable.sh
+
   build:
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
 
     steps:
       - name: Checkout
@@ -17,12 +27,18 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
+      - name: Host regressions (simulated APIs, temporary files)
+        run: |
+          sh Scripts/test-portable.sh
+          sh Scripts/test-macos.sh
+          plutil -lint Locus.xcodeproj/project.pbxproj Locus/Locus.entitlements
+
       - name: Build unsigned app
         run: |
           xcodebuild \
             -project Locus.xcodeproj \
             -scheme Locus \
-            -configuration Release \
+            -configuration '${{ matrix.configuration }}' \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
@@ -31,15 +47,20 @@ jobs:
             build
 
       - name: Create unsigned IPA
+        if: matrix.configuration == 'Release'
         run: |
           APP="$(find "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos" \
             -maxdepth 1 -type d -name '*.app' -print -quit)"
           test -n "$APP"
           mkdir -p Payload
           cp -R "$APP" Payload/
+          test -f Payload/Locus.app/LICENSE
+          test -f Payload/Locus.app/THIRD_PARTY_NOTICES.md
+          test -f Payload/Locus.app/Locus-original-MIT.txt
           zip -qry Locus-unsigned.ipa Payload
 
       - name: Upload IPA
+        if: matrix.configuration == 'Release'
         uses: actions/upload-artifact@v7
         with:
           name: Locus-unsigned

@@ -15,7 +15,7 @@ struct CoreTextGB18030View: View {
             List {
                 Section("Capability") {
                     valueRow("OS Build", probe["build"])
-                    valueRow("Exact Build Supported", probe["buildSupported"])
+                    valueRow("Binary Supported", probe["binarySupported"])
                     valueRow("CoreText Loaded", probe["coreTextLoaded"])
                     valueRow("Address Validated", probe["addressValidated"])
                     valueRow("Image", probe["imageName"])
@@ -44,7 +44,7 @@ struct CoreTextGB18030View: View {
                     }
                     .disabled(
                         isRunning
-                        || !boolean(probe["buildSupported"])
+                        || !boolean(probe["binarySupported"])
                         || !boolean(probe["addressValidated"])
                     )
 

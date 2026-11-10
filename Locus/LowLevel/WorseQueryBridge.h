@@ -1,15 +1,15 @@
 //
-//  BadQueryBridge.h
+//  WorseQueryBridge.h
 //  Locus
 //
-//  Path-based ContainerManager query derived from forcequitOS/bad_query.
+//  Scoped leases for the forcequitOS/worse_query App Group query.
 //
 
 #import <Foundation/Foundation.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface BadQueryLease : NSObject
+@interface WorseQueryLease : NSObject
 
 @property(nonatomic, copy, readonly) NSString *targetPath;
 @property(nonatomic, readonly, getter=isActive) BOOL active;
@@ -20,19 +20,20 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-FOUNDATION_EXPORT BOOL BadQueryBridgeAvailable(void);
+FOUNDATION_EXPORT BOOL WorseQueryBridgeAvailable(void);
+FOUNDATION_EXPORT NSString * _Nullable WorseQueryAccessConfigurationError(void);
 
 //
 // Enumerate immediate children without opening the parent directory.
 //
-// This is the fsgetpath/inode-scan helper used by upstream bad_query for
-// containers whose parent directory cannot normally be enumerated.
+// The existing fsgetpath/inode discovery primitive remains independent of grants.
 //
 // Returned paths use /var/... form when fsgetpath reports /private/var/....
 //
 FOUNDATION_EXPORT NSArray<NSString *> * _Nullable
-BadQueryListImmediateChildren(NSString *path,
+WorseQueryListImmediateChildren(NSString *path,
                               uint64_t maxInode,
                               NSString * _Nullable * _Nullable error);
 
 NS_ASSUME_NONNULL_END
+

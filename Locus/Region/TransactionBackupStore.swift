@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 struct RegionTransactionBackup {
     let directory: URL
@@ -14,9 +15,11 @@ struct RegionTransactionBackup {
     private func saveExact(_ data: Data, name: String) throws {
         let url = directory.appendingPathComponent(name)
         try data.write(to: url, options: .atomic)
+        try syncBackup(url)
         guard try Data(contentsOf: url) == data else {
             throw CocoaError(.fileWriteUnknown)
         }
+        try syncBackup(directory)
     }
 }
 
@@ -37,6 +40,8 @@ enum TransactionBackupStore {
             withIntermediateDirectories: true
         )
 
+        try syncBackup(documents)
+
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss-SSS"
@@ -46,6 +51,14 @@ enum TransactionBackupStore {
             at: directory,
             withIntermediateDirectories: false
         )
+        try syncBackup(root)
         return RegionTransactionBackup(directory: directory)
     }
+}
+
+private func syncBackup(_ url: URL) throws {
+    let fd = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    defer { close(fd) }
+    guard fsync(fd) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
 }

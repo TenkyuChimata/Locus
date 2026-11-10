@@ -1,48 +1,23 @@
 import Foundation
 
 enum JapanRegionMutation {
-    static let verifiedBuild = "24A5390f"
-
     static let regionCodeKey = "h63QSdBCiT/z0WU6rdQv6Q"
     static let regionInfoKey = "yK+xavymRGZ3xWc1tb8XDg"
     static let regulatoryModelKey = "97JDvERpVwO+GHtthIh7hA"
-
-    private struct CacheBooleanPatch {
-        let cacheDataSize: Int
-        let valueOffset: Int
-        let validOffset: Int
-        let value: Bool
-    }
-
-    // Exact MobileGestalt descriptor slots recovered only for 24A5390f.
-    private static let patchesByBuild: [String: [CacheBooleanPatch]] = [
-        verifiedBuild: [
-            // green-tea: slot 0x17E
-            .init(cacheDataSize: 0x1947, valueOffset: 0x0BF0, validOffset: 0x17F6, value: false),
-            // not-green-tea: slot 0x1F9
-            .init(cacheDataSize: 0x1947, valueOffset: 0x0FC8, validOffset: 0x1871, value: true),
-            // wapi: slot 0x2B5
-            .init(cacheDataSize: 0x1947, valueOffset: 0x15A8, validOffset: 0x192D, value: false)
-        ]
-    ]
 
     static func validate(
         plist: [String: Any],
         profile: JapanRegionProfile,
         build: String
     ) throws {
-        guard build == verifiedBuild, let patches = patchesByBuild[build] else {
-            throw JapanRegionError.unsupportedBuild(build)
-        }
-        guard plist["CacheExtra"] is [String: Any] else {
+        guard let extra = plist["CacheExtra"] as? [String: Any],
+              [regionCodeKey, regionInfoKey, regulatoryModelKey].allSatisfy({
+                  guard let value = extra[$0] as? String else { return false }
+                  return !value.isEmpty
+              }) else {
             throw JapanRegionError.invalidMobileGestalt
         }
-        guard let cacheData = plist["CacheData"] as? Data else {
-            throw JapanRegionError.missingCacheData
-        }
-        guard patches.allSatisfy({ $0.cacheDataSize == cacheData.count }) else {
-            throw JapanRegionError.unexpectedCacheDataSize(cacheData.count)
-        }
+        _ = try JapanRegionCacheLayout.resolve(plist: plist, build: build)
         guard JapanRegionProfile.verified(for: profile.productType) == profile else {
             throw JapanRegionError.unsupportedProductType(profile.productType)
         }
@@ -55,8 +30,7 @@ enum JapanRegionMutation {
     ) throws -> [String: Any] {
         try validate(plist: plist, profile: profile, build: build)
         guard var cacheExtra = plist["CacheExtra"] as? [String: Any],
-              var cacheData = plist["CacheData"] as? Data,
-              let patches = patchesByBuild[build] else {
+              let cacheData = plist["CacheData"] as? Data else {
             throw JapanRegionError.invalidMobileGestalt
         }
 
@@ -65,13 +39,12 @@ enum JapanRegionMutation {
         cacheExtra[regionInfoKey] = "J/A"
         cacheExtra[regulatoryModelKey] = profile.regulatoryModel
 
-        for patch in patches {
-            try apply(patch, to: &cacheData)
-        }
+        let layout = try JapanRegionCacheLayout.resolve(plist: plist, build: build)
+        let updatedCacheData = try layout.applying(to: cacheData)
 
         var result = plist
         result["CacheExtra"] = cacheExtra
-        result["CacheData"] = cacheData
+        result["CacheData"] = updatedCacheData
         return result
     }
 
@@ -82,46 +55,19 @@ enum JapanRegionMutation {
     ) -> Bool {
         guard let cacheExtra = plist["CacheExtra"] as? [String: Any],
               let cacheData = plist["CacheData"] as? Data,
-              let patches = patchesByBuild[build],
+              let layout = try? JapanRegionCacheLayout.resolve(plist: plist, build: build),
               cacheExtra[regionCodeKey] as? String == "J",
               cacheExtra[regionInfoKey] as? String == "J/A",
               cacheExtra[regulatoryModelKey] as? String == profile.regulatoryModel else {
             return false
         }
-        return patches.allSatisfy { isApplied($0, to: cacheData) }
-    }
-
-    private static func apply(_ patch: CacheBooleanPatch, to data: inout Data) throws {
-        let end = patch.valueOffset + MemoryLayout<UInt64>.size
-        guard data.count == patch.cacheDataSize,
-              patch.valueOffset >= 0,
-              end <= data.count,
-              patch.validOffset >= 0,
-              patch.validOffset < data.count else {
-            throw JapanRegionError.invalidCachePatchLayout
-        }
-
-        var slot = Data(repeating: 0, count: MemoryLayout<UInt64>.size)
-        slot[0] = patch.value ? 1 : 0
-        data.replaceSubrange(patch.valueOffset..<end, with: slot)
-        data[patch.validOffset] = 1
-    }
-
-    private static func isApplied(_ patch: CacheBooleanPatch, to data: Data) -> Bool {
-        let end = patch.valueOffset + MemoryLayout<UInt64>.size
-        guard data.count == patch.cacheDataSize,
-              patch.valueOffset >= 0,
-              end <= data.count,
-              patch.validOffset >= 0,
-              patch.validOffset < data.count else { return false }
-        return data[patch.valueOffset] == (patch.value ? 1 : 0)
-            && data[(patch.valueOffset + 1)..<end].allSatisfy { $0 == 0 }
-            && data[patch.validOffset] == 1
+        return layout.isApplied(to: cacheData)
     }
 }
 
 enum JapanRegionError: LocalizedError {
-    case unsupportedBuild(String)
+    case unverifiedCacheSemantics
+    case staleCache
     case unsupportedProductType(String)
     case invalidMobileGestalt
     case missingCacheData
@@ -133,8 +79,10 @@ enum JapanRegionError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unsupportedBuild(let build):
-            "Persistent mutation is verified only on Darwin build \(JapanRegionMutation.verifiedBuild). Current build: \(build.isEmpty ? "<unknown>" : build)."
+        case .unverifiedCacheSemantics:
+            "CacheData question-to-slot semantics are unverified. A reviewed CacheUUID/descriptor mapping is required; matching length or OS build is insufficient. Diagnostics remain available."
+        case .staleCache:
+            "The MobileGestalt cache version does not match the running system. Refusing stale data."
         case .unsupportedProductType(let productType):
             "No verified Japan profile exists for \(productType.isEmpty ? "<unknown>" : productType). Hardware identity will not be spoofed."
         case .invalidMobileGestalt:
@@ -142,9 +90,9 @@ enum JapanRegionError: LocalizedError {
         case .missingCacheData:
             "MobileGestalt CacheData is missing."
         case .unexpectedCacheDataSize(let size):
-            "CacheData has an unverified size (\(size) bytes); refusing the exact-build patch."
+            "CacheData has an unverified size (\(size) bytes); refusing mutation."
         case .invalidCachePatchLayout:
-            "The exact-build CacheData patch layout is invalid."
+            "The CacheData boolean slots, validity flags, or mutation bounds are invalid."
         case .activationVerificationFailed:
             "MobileActivation did not contain JP, J/A, and SoftwareBehaviors 25 after writing."
         case .mobileGestaltVerificationFailed:

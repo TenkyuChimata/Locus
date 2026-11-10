@@ -2,13 +2,13 @@
 //  MobileGestaltAccess.m
 //  Locus
 //
-//  The in-place rewrite and bad_query lease behavior are retained from the
+//  The in-place rewrite and worse_query lease behavior are retained from the
 //  MIT-licensed GestaltEdit implementation. Replacing the backing inode is
 //  deliberately avoided.
 //
 
 #import "MobileGestaltAccess.h"
-#import "BadQueryBridge.h"
+#import "WorseQueryBridge.h"
 
 #import <dlfcn.h>
 #import <errno.h>
@@ -30,7 +30,6 @@ static NSString * const LocusGestaltReadDirectory =
 static NSString * const LocusGestaltLeaseDirectory =
     @"/var/containers/Shared/SystemGroup/"
      "systemgroup.com.apple.mobilegestaltcache/Library/Caches";
-static NSString * const LocusVerifiedJapanBuild = @"24A5390f";
 
 static NSError *LocusGestaltError(NSInteger code, NSString *message)
 {
@@ -144,7 +143,7 @@ static BOOL LocusRewriteExistingFile(
 }
 
 @interface MobileGestaltAccess ()
-@property(nonatomic, strong, nullable) BadQueryLease *lease;
+@property(nonatomic, strong, nullable) WorseQueryLease *lease;
 @property(nonatomic, copy, nullable) NSString *plistPath;
 @property(nonatomic) NSPropertyListFormat lastReadFormat;
 @end
@@ -176,28 +175,9 @@ static BOOL LocusRewriteExistingFile(
     return [NSString stringWithUTF8String:data.bytes] ?: @"";
 }
 
-+ (BOOL)japanMutationBuildSupported
-{
-    return [[self currentOSBuild] isEqualToString:LocusVerifiedJapanBuild];
-}
-
 - (BOOL)acquireLeaseRequiringWrite:(BOOL)requiringWrite
                              error:(NSError **)error
 {
-    if (requiringWrite && ![MobileGestaltAccess japanMutationBuildSupported]) {
-        NSString *currentBuild = [MobileGestaltAccess currentOSBuild];
-        if (error) {
-            *error = LocusGestaltError(
-                1,
-                [NSString stringWithFormat:
-                    @"Japan Region mutation is verified only on %@; current build is %@.",
-                    LocusVerifiedJapanBuild,
-                    currentBuild.length > 0 ? currentBuild : @"<unknown>"]
-            );
-        }
-        return NO;
-    }
-
     NSString *readPath = [LocusGestaltReadDirectory
         stringByAppendingPathComponent:LocusGestaltFileName];
     if (self.lease.isActive && [self.plistPath isEqualToString:readPath]) {
@@ -217,17 +197,17 @@ static BOOL LocusRewriteExistingFile(
     self.lease = nil;
     self.plistPath = nil;
 
-    if (!BadQueryBridgeAvailable()) {
+    if (!WorseQueryBridgeAvailable()) {
         if (error) {
-            *error = LocusGestaltError(2, @"bad_query is unavailable.");
+            *error = LocusGestaltError(2, @"worse_query is unavailable.");
         }
         return NO;
     }
 
-    NSString *leasePath = [LocusGestaltLeaseDirectory
-        stringByAppendingPathComponent:LocusGestaltFileName];
+    // Upstream's App Group part query targets the existing cache directory.
+    NSString *leasePath = LocusGestaltLeaseDirectory;
     NSString *leaseDetail = nil;
-    BadQueryLease *lease = [BadQueryLease leaseForPath:leasePath
+    WorseQueryLease *lease = [WorseQueryLease leaseForPath:leasePath
                                                  error:&leaseDetail];
     if (!lease) {
         if (error) {
@@ -267,107 +247,115 @@ static BOOL LocusRewriteExistingFile(
 
 - (NSData *)readCacheDataWithError:(NSError **)error
 {
-    if (![self acquireLeaseRequiringWrite:NO error:error]) {
-        return nil;
-    }
-
-    NSError *readError = nil;
-    NSData *data = [NSData dataWithContentsOfFile:self.plistPath
-                                          options:NSDataReadingMappedIfSafe
-                                            error:&readError];
-    if (data) {
-        NSPropertyListFormat detectedFormat = NSPropertyListBinaryFormat_v1_0;
-        id detected = [NSPropertyListSerialization propertyListWithData:data
-                                                                 options:0
-                                                                  format:&detectedFormat
-                                                                   error:NULL];
-        if ([detected isKindOfClass:NSDictionary.class]) {
-            self.lastReadFormat = detectedFormat;
+    @synchronized (self) {
+        if (![self acquireLeaseRequiringWrite:NO error:error]) {
+            return nil;
         }
+
+        NSError *readError = nil;
+        NSData *data = [NSData dataWithContentsOfFile:self.plistPath
+                                              options:NSDataReadingMappedIfSafe
+                                                error:&readError];
+        if (data) {
+            NSPropertyListFormat detectedFormat = NSPropertyListBinaryFormat_v1_0;
+            id detected = [NSPropertyListSerialization propertyListWithData:data
+                                                                     options:0
+                                                                      format:&detectedFormat
+                                                                       error:NULL];
+            if ([detected isKindOfClass:NSDictionary.class]) {
+                self.lastReadFormat = detectedFormat;
+            }
+        }
+        if (!data && error) {
+            *error = readError ?: LocusGestaltError(5, @"Failed to read MobileGestalt.");
+        } else if (error) {
+            *error = nil;
+        }
+        return data ? [NSData dataWithData:data] : nil;
     }
-    if (!data && error) {
-        *error = readError ?: LocusGestaltError(5, @"Failed to read MobileGestalt.");
-    } else if (error) {
-        *error = nil;
-    }
-    return data ? [NSData dataWithData:data] : nil;
 }
 
 - (NSDictionary *)readCachePlistWithError:(NSError **)error
 {
-    NSData *data = [self readCacheDataWithError:error];
-    if (!data) {
-        return nil;
-    }
-
-    NSPropertyListFormat format = NSPropertyListBinaryFormat_v1_0;
-    NSError *parseError = nil;
-    id value = [NSPropertyListSerialization propertyListWithData:data
-                                                         options:0
-                                                          format:&format
-                                                           error:&parseError];
-    if (![value isKindOfClass:NSDictionary.class]) {
-        if (error) {
-            *error = parseError ?: LocusGestaltError(
-                6,
-                @"The MobileGestalt plist is not a dictionary."
-            );
+    @synchronized (self) {
+        NSData *data = [self readCacheDataWithError:error];
+        if (!data) {
+            return nil;
         }
-        return nil;
+
+        NSPropertyListFormat format = NSPropertyListBinaryFormat_v1_0;
+        NSError *parseError = nil;
+        id value = [NSPropertyListSerialization propertyListWithData:data
+                                                             options:0
+                                                              format:&format
+                                                               error:&parseError];
+        if (![value isKindOfClass:NSDictionary.class]) {
+            if (error) {
+                *error = parseError ?: LocusGestaltError(
+                    6,
+                    @"The MobileGestalt plist is not a dictionary."
+                );
+            }
+            return nil;
+        }
+        self.lastReadFormat = format;
+        if (error) {
+            *error = nil;
+        }
+        return value;
     }
-    self.lastReadFormat = format;
-    if (error) {
-        *error = nil;
-    }
-    return value;
 }
 
 - (BOOL)saveCachePlist:(NSDictionary *)plist error:(NSError **)error
 {
-    if (![self acquireLeaseRequiringWrite:YES error:error]) {
-        return NO;
-    }
-    if (![plist isKindOfClass:NSDictionary.class]) {
-        if (error) {
-            *error = LocusGestaltError(7, @"The MobileGestalt replacement is not a dictionary.");
+    @synchronized (self) {
+        if (![self acquireLeaseRequiringWrite:YES error:error]) {
+            return NO;
         }
-        return NO;
-    }
+        if (![plist isKindOfClass:NSDictionary.class]) {
+            if (error) {
+                *error = LocusGestaltError(7, @"The MobileGestalt replacement is not a dictionary.");
+            }
+            return NO;
+        }
 
-    NSPropertyListFormat format = self.lastReadFormat;
-    if (format != NSPropertyListXMLFormat_v1_0 &&
-        format != NSPropertyListBinaryFormat_v1_0) {
-        format = NSPropertyListBinaryFormat_v1_0;
-    }
-    NSError *serializationError = nil;
-    NSData *data = [NSPropertyListSerialization dataWithPropertyList:plist
-                                                              format:format
-                                                             options:0
-                                                               error:&serializationError];
-    if (!data) {
-        if (error) {
-            *error = serializationError ?: LocusGestaltError(
-                8,
-                @"Failed to serialize MobileGestalt."
-            );
+        NSPropertyListFormat format = self.lastReadFormat;
+        if (format != NSPropertyListXMLFormat_v1_0 &&
+            format != NSPropertyListBinaryFormat_v1_0) {
+            format = NSPropertyListBinaryFormat_v1_0;
         }
-        return NO;
+        NSError *serializationError = nil;
+        NSData *data = [NSPropertyListSerialization dataWithPropertyList:plist
+                                                                  format:format
+                                                                 options:0
+                                                                   error:&serializationError];
+        if (!data) {
+            if (error) {
+                *error = serializationError ?: LocusGestaltError(
+                    8,
+                    @"Failed to serialize MobileGestalt."
+                );
+            }
+            return NO;
+        }
+        return LocusRewriteExistingFile(self.plistPath, data, 20, error);
     }
-    return LocusRewriteExistingFile(self.plistPath, data, 20, error);
 }
 
 - (BOOL)restoreCacheData:(NSData *)data error:(NSError **)error
 {
-    if (![self acquireLeaseRequiringWrite:YES error:error]) {
-        return NO;
-    }
-    if (![data isKindOfClass:NSData.class] || data.length == 0) {
-        if (error) {
-            *error = LocusGestaltError(30, @"The MobileGestalt backup is empty.");
+    @synchronized (self) {
+        if (![self acquireLeaseRequiringWrite:YES error:error]) {
+            return NO;
         }
-        return NO;
+        if (![data isKindOfClass:NSData.class] || data.length == 0) {
+            if (error) {
+                *error = LocusGestaltError(30, @"The MobileGestalt backup is empty.");
+            }
+            return NO;
+        }
+        return LocusRewriteExistingFile(self.plistPath, data, 31, error);
     }
-    return LocusRewriteExistingFile(self.plistPath, data, 31, error);
 }
 
 - (NSDictionary<NSString *, id> *)runtimeAnswersForQuestions:

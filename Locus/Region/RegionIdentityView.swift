@@ -101,12 +101,12 @@ struct RegionIdentityView: View {
     private var supportSection: some View {
         Section("Mutation Capability") {
             statusRow(
-                "Exact Build Path",
-                text: service.snapshot?.exactBuildSupported == true ? "Supported" : "Unsupported",
-                systemImage: service.snapshot?.exactBuildSupported == true
+                "Cache Layout",
+                text: service.snapshot?.layoutSupported == true ? "Supported" : "Unsupported",
+                systemImage: service.snapshot?.layoutSupported == true
                     ? "checkmark.circle.fill"
                     : "xmark.circle.fill",
-                color: service.snapshot?.exactBuildSupported == true ? .green : .orange
+                color: service.snapshot?.layoutSupported == true ? .green : .orange
             )
             statusRow(
                 "Verified Profile",
