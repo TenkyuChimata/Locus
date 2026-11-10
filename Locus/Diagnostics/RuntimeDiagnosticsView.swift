@@ -22,6 +22,7 @@ struct RuntimeDiagnosticsView: View {
                 }
 
                 mobileActivationSection
+                metadataAccessSection
                 deviceTreeSection
                 syscfgSection
                 cacheLayoutSection
@@ -58,12 +59,32 @@ struct RuntimeDiagnosticsView: View {
             valueRow("Direct Error Details", service.activation["backingErrorDetails"])
             valueRow("Path State", service.activation["backingPathState"])
             valueRow("Lease Target State", service.activation["regionLeaseTargetState"])
-            valueRow("Discovery", activationDiscovery.filter {
-                !["identityQuery", "metadataPathProbes", "metadataReadErrors"].contains($0.key)
-            })
-            valueRow("Identity Query", activationDiscovery["identityQuery"])
-            valueRow("Metadata Read Errors", activationDiscovery["metadataReadErrors"])
-            valueRow("Metadata Path Probes", activationDiscovery["metadataPathProbes"])
+            valueRow("Discovery Source", activationDiscovery["source"])
+            DisclosureGroup("Discovery scope and directory leases") {
+                ForEach([("candidateCount", "Candidates in scan"), ("uuidCandidateCount", "UUID candidates"),
+                         ("namedCandidateInScan", "Named candidate in scan"),
+                         ("uuidMetadataDirectoriesLeased", "UUID directory leases"),
+                         ("uuidMetadataLeaseFailures", "UUID lease failures"),
+                         ("namedMetadataDirectoriesLeased", "Named directory leases"),
+                         ("namedMetadataLeaseFailures", "Named lease failures"),
+                         ("inodeScanPerformed", "Scan attempted"), ("inodeLimit", "Inode limit"),
+                         ("scanCoverage", "Coverage"), ("rootInodeAboveLimit", "Root inode exceeds limit"),
+                         ("rootInodeError", "Root inode error"), ("lastMetadataLeaseDetail", "Lease detail")], id: \.0) { key, title in
+                    valueRow(title, activationDiscovery[key])
+                }
+            }
+            sourceHeader("Identity Query")
+            ForEach([("status", "Query Status"), ("apiAvailable", "API Available"),
+                     ("queryCreated", "Query Created"), ("iterationReturned", "Iteration Returned"),
+                     ("iterationCompleted", "Iteration Completed"), ("results", "Visible Results"),
+                     ("errorIntrospectionAvailable", "Query Error Getter Available"),
+                     ("queryErrorPresent", "Query Error Object Present"),
+                     ("errorTypeGetterAvailable", "Error Type Getter Available"),
+                     ("errorPOSIXGetterAvailable", "POSIX Getter Available"),
+                     ("queryErrorType", "Query Error Type"), ("queryErrorName", "Query Error Name"),
+                     ("queryErrorPOSIXCode", "Query POSIX Code"), ("enumerationRights", "Enumeration Rights")], id: \.0) { key, title in
+                valueRow(title, (activationDiscovery["identityQuery"] as? [String: Any])?[key])
+            }
             valueRow("Schema Supported", service.activation["mutationSchemaSupported"])
             valueRow("Schema Error", service.activation["mutationSchemaError"])
             valueRow("Schema Error Details", service.activation["mutationSchemaErrorDetails"])
@@ -92,6 +113,41 @@ struct RuntimeDiagnosticsView: View {
 
     private var activationDiscovery: [String: Any] {
         service.activation["discovery"] as? [String: Any] ?? [:]
+    }
+
+    private var metadataAccessSection: some View {
+        Section {
+            valueRow("Metadata path targets", activationDiscovery["metadataFilesAttempted"])
+            valueRow("Data read requests", activationDiscovery["metadataReadAttempts"])
+            valueRow("Unreadable path targets", activationDiscovery["metadataReadFailures"])
+            valueRow("Alias read recoveries", activationDiscovery["metadataAliasReadRecoveries"])
+            valueRow("Alias identity failures", activationDiscovery["metadataAliasIdentityFailures"])
+            ForEach(MobileActivationDiagnosticSummary.aliasRows(activationDiscovery)) { row in
+                labeledValue(row.title, value: row.value)
+            }
+            ForEach(MobileActivationDiagnosticSummary.probeGroups(activationDiscovery)) { group in
+                DisclosureGroup(group.title) {
+                    ForEach(group.rows) { row in
+                        labeledValue(row.title, value: row.value)
+                    }
+                }
+            }
+            DisclosureGroup("Complete read error distribution") {
+                ForEach(MobileActivationDiagnosticSummary.readErrorRows(activationDiscovery)) { row in
+                    labeledValue(row.title, value: row.value)
+                }
+            }
+            DisclosureGroup("Latest errors by stage") {
+                valueRow("Metadata Read", activationDiscovery["lastMetadataReadFailure"])
+                valueRow("Directory Lease", activationDiscovery["lastMetadataLeaseFailure"])
+                valueRow("Plist Parse", activationDiscovery["lastMetadataParseFailure"])
+                valueRow("Alias Identity", activationDiscovery["lastMetadataAliasIdentityFailure"])
+            }
+        } header: {
+            Text("Metadata Access")
+        } footer: {
+            Text("Each count belongs to one operation and path alias. Do not add stat/lstat/lookup counts as files. An opened directory or object does not prove metadata content is readable. EPERM does not identify the enforcing policy.")
+        }
     }
 
     private var cacheLayoutSection: some View {

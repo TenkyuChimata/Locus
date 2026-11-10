@@ -40,6 +40,8 @@ static NSArray<NSString *> *candidates;
 static BOOL failLease, failFramework, failSymbol, failAPI;
 static NSUInteger resolverCalls, acquired, invalidated;
 static BOOL queryEnabled, queryThrows, realStats, namedEnabled, denyPrivateMetadata;
+static BOOL queryIncomplete, queryErrorAvailable = YES, queryNullResult;
+static BOOL denyHiddenOpen;
 static NSArray<NSDictionary *> *queryObjects;
 static NSUInteger queriesCreated, queriesFreed, openDescriptors;
 static NSUInteger librariesOpened, librariesClosed;
@@ -80,12 +82,17 @@ static const char *ObjectIdentifier(void *object)
     NSDictionary *value = (__bridge NSDictionary *)object;
     return [value[@"identifier"] UTF8String];
 }
-static void QueryIterate(void *query, bool (^visit)(void *))
+static bool QueryIterate(void *query, bool (^visit)(void *))
 {
     assert(query);
     if (queryThrows) @throw [NSException exceptionWithName:@"SimulatedQueryFailure" reason:nil userInfo:nil];
-    for (NSDictionary *object in queryObjects) if (!visit((__bridge void *)object)) break;
+    if (queryNullResult && !visit(NULL)) return false;
+    for (NSDictionary *object in queryObjects) if (!visit((__bridge void *)object)) return false;
+    return !queryIncomplete;
 }
+static void *QueryLastError(void *query) { assert(query); return queryIncomplete ? (void *)2 : NULL; }
+static uint64_t QueryErrorType(void *error) { assert(error == (void *)2); return 55; }
+static int QueryPOSIXError(void *error) { assert(error == (void *)2); return EPERM; }
 static void *TestOpen(const char *path, int flags)
 {
     (void)path; (void)flags;
@@ -106,6 +113,11 @@ static void *TestSymbol(void *handle, const char *name)
         if (!strcmp(name, "container_query_free")) return (void *)QueryFree;
         if (!strcmp(name, "container_object_get_path")) return (void *)ObjectPath;
         if (!strcmp(name, "container_object_get_identifier")) return (void *)ObjectIdentifier;
+        if (queryErrorAvailable) {
+            if (!strcmp(name, "container_query_get_last_error")) return (void *)QueryLastError;
+            if (!strcmp(name, "container_error_get_type")) return (void *)QueryErrorType;
+            if (!strcmp(name, "container_error_get_posix_errno")) return (void *)QueryPOSIXError;
+        }
     }
     if (!strcmp(name, "MAECopyDeviceRegionInfoWithError")) return (void *)CopyRegion;
     if (!strcmp(name, "kMADeviceRegionCountryCode")) return &countryKey;
@@ -128,6 +140,10 @@ static int TestFollowStat(const char *path, struct stat *state)
 static int TestFileOpen(const char *path, int flags, ...)
 {
     NSString *actual = [NSString stringWithUTF8String:path];
+    if (denyHiddenOpen && [actual.lastPathComponent isEqual:LocusMetadataHidden]) {
+        errno = EPERM;
+        return -1;
+    }
     NSString *named = [LocusSystemGroupRoot stringByAppendingPathComponent:LocusActivationSystemGroup];
     if (namedEnabled && ([actual isEqual:named] || [actual isEqual:LocusPrivateVarPath(named)])) {
         actual = [actual isEqual:LocusPrivateVarPath(named)] && privateNamedDirectory ?
@@ -221,6 +237,8 @@ static void CheckIdentityQueries(void)
     queryObjects = @[object];
     assert([LocusFindSystemGroupByQuery(summary) isEqual:named]);
     assert([summary[@"identityQuery"][@"status"] isEqual:@"matched"]);
+    assert([summary[@"identityQuery"][@"apiAvailable"] boolValue]);
+    assert([summary[@"identityQuery"][@"iterationCompleted"] boolValue]);
     queryObjects = @[object, @{@"path": LocusPrivateVarPath(named), @"identifier": LocusActivationSystemGroup}];
     assert([LocusFindSystemGroupByQuery(summary) isEqual:named]); // same normalized identity
     NSString *other = [LocusSystemGroupRoot stringByAppendingPathComponent:@"00000000-0000-4000-8000-000000000001"];
@@ -236,6 +254,30 @@ static void CheckIdentityQueries(void)
     queryObjects = @[@{@"path": named, @"identifier": @"unrelated"}];
     assert(!LocusFindSystemGroupByQuery(summary));
     assert([summary[@"identityQuery"][@"status"] isEqual:@"no-visible-match"]);
+    // A successful empty visible list and a failed query used to share the
+    // same status. No matching result from an incomplete query may be trusted.
+    queryObjects = @[];
+    assert(!LocusFindSystemGroupByQuery(summary));
+    assert([summary[@"identityQuery"][@"iterationCompleted"] boolValue]);
+    assert([summary[@"identityQuery"][@"results"] intValue] == 0);
+    queryIncomplete = YES;
+    assert(!LocusFindSystemGroupByQuery(summary));
+    assert([summary[@"identityQuery"][@"status"] isEqual:@"iteration-failed"]);
+    assert([summary[@"identityQuery"][@"queryErrorType"] intValue] == 55);
+    assert([summary[@"identityQuery"][@"queryErrorPOSIXCode"] intValue] == EPERM);
+    assert(![summary[@"identityQuery"][@"iterationCompleted"] boolValue]);
+    queryObjects = @[object];
+    assert(!LocusFindSystemGroupByQuery(summary));
+    queryErrorAvailable = NO;
+    assert(!LocusFindSystemGroupByQuery(summary));
+    assert(summary[@"identityQuery"][@"queryErrorType"] == nil);
+    queryErrorAvailable = YES; queryIncomplete = NO;
+    queryNullResult = YES;
+    assert(!LocusFindSystemGroupByQuery(summary));
+    assert([summary[@"identityQuery"][@"status"] isEqual:@"invalid-result-object"]);
+    assert([summary[@"identityQuery"][@"callbacks"] intValue] == 2);
+    assert([summary[@"identityQuery"][@"results"] intValue] == 1);
+    queryNullResult = NO;
     NSMutableArray *many = [NSMutableArray new];
     for (NSUInteger i = 0; i < 513; i++) [many addObject:object];
     queryObjects = many;
@@ -244,6 +286,8 @@ static void CheckIdentityQueries(void)
     queryThrows = YES;
     assert(!LocusFindSystemGroupByQuery(summary));
     assert([summary[@"identityQuery"][@"status"] isEqual:@"query-exception"]);
+    assert(![summary[@"identityQuery"][@"iterationReturned"] boolValue]);
+    assert(summary[@"identityQuery"][@"iterationCompleted"] == NSNull.null);
     queryThrows = NO; queryEnabled = NO; queryObjects = nil;
     assert(!LocusFindSystemGroupByQuery(summary));
     assert([summary[@"identityQuery"][@"status"] isEqual:@"unavailable"]);
@@ -286,6 +330,12 @@ int main(void)
         failLease = NO;
         result = Probe();
         assert([result[@"discovery"][@"metadataReadFailures"] intValue] == 2);
+        assert([result[@"discovery"][@"metadataFilesAttempted"] intValue] == 2);
+        assert([result[@"discovery"][@"metadataDirectoriesLeased"] intValue] == 1);
+        assert([result[@"discovery"][@"namedMetadataLeaseFailures"] intValue] == 1);
+        assert([result[@"discovery"][@"uuidMetadataLeaseFailures"] intValue] == 0);
+        assert(result[@"discovery"][@"lastMetadataReadFailure"] != nil);
+        assert(result[@"discovery"][@"lastMetadataLeaseFailure"] != nil);
         NSString *metadata = [temporary stringByAppendingPathComponent:LocusMetadataHidden];
         WritePlist(@[@"wrong root"], metadata);
         result = Probe();
@@ -300,7 +350,16 @@ int main(void)
         struct stat identity;
         assert(LocusProbeMetadataDirectory(temporary, @"control", pathSummary, &identity));
         assert([pathSummary[@"control.hidden.lstat=regular-file"] intValue] == 1);
+        assert([pathSummary[@"control.hidden.fstat=regular-file"] intValue] == 1);
         assert([pathSummary[@"control.plain.lookup-not-found-with-open-parent"] intValue] == 1);
+        denyHiddenOpen = YES;
+        NSMutableDictionary *deniedSummary = [NSMutableDictionary new];
+        assert(LocusProbeMetadataDirectory(temporary, @"denied", deniedSummary, &identity));
+        assert([deniedSummary[@"denied.hidden.lstat=regular-file"] intValue] == 1);
+        assert([deniedSummary[@"denied.hidden.relative-lstat=regular-file"] intValue] == 1);
+        assert([deniedSummary[@"denied.hidden.open=NSPOSIXErrorDomain:1"] intValue] == 1);
+        assert(deniedSummary[@"denied.hidden.fstat=regular-file"] == nil);
+        denyHiddenOpen = NO;
         assert(openDescriptors == 0);
         realStats = NO;
         result = Probe();

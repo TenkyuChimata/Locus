@@ -14,6 +14,9 @@ clang -fobjc-arc -fmodules -Wall -Wextra -Werror -Wno-nullability-completeness \
   -I Locus/LowLevel -framework Foundation \
   Tests/ActivationDiagnosticsTests.m -o "$temporary/activation-diagnostics-tests"
 "$temporary/activation-diagnostics-tests"
+swiftc Locus/Diagnostics/MobileActivationDiagnosticSummary.swift Tests/Diagnostics/main.swift \
+  -o "$temporary/diagnostics-summary-tests"
+"$temporary/diagnostics-summary-tests"
 for activation in 0 1; do
   clang -fobjc-arc -fmodules -Wall -Wextra -Werror -Wno-nullability-completeness \
     -DLOCUS_TEST_ACTIVATION="$activation" -I Locus/LowLevel -framework Foundation \
