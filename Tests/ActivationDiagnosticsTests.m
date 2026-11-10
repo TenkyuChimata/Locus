@@ -375,6 +375,10 @@ int main(void)
         assert(result[@"resolvedBackingPath"] != NSNull.null);
         failLease = NO;
         normalPath = temporary;
+        result = Probe();
+        assert(![result[@"backingReadSucceeded"] boolValue]); // resolver path outside SystemGroup is refused
+        normalPath = nil;
+        LocusCachedActivationSystemGroupPath = temporary; // earlier synthetic metadata identity match
         NSString *backing = [directory stringByAppendingPathComponent:@"region_info.plist"];
         WritePlist(@[@"wrong root"], backing);
         result = Probe();
@@ -391,7 +395,9 @@ int main(void)
         failAPI = NO;
         result = Probe();
         assert([result[@"backingStage"] isEqual:@"complete"]);
-        assert([result[@"mutationSchemaSupported"] boolValue]);
+        assert([result[@"backingSchemaValid"] boolValue]);
+        assert([result[@"backingWriteAccessAvailable"] boolValue]); // temporary regular file only; probe does not mutate it
+        assert(![result[@"mutationSchemaSupported"] boolValue]); // schema shape alone is not binary verification
         assert([result[@"effectiveStage"] isEqual:@"complete"]);
         assert([original isEqual:[NSData dataWithContentsOfFile:backing]]);
 

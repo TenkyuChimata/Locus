@@ -1,62 +1,81 @@
 # Locus
 
-Locus is a focused iOS/iPadOS region and runtime research utility. It has three
-areas:
+Locus is a focused iOS/iPadOS region and runtime research utility. Japan Region
+contains independent modules for MobileGestalt region identity, regional cache
+behaviors, Apple Intelligence capability, MobileActivation, and a strict full
+Japan transaction. Diagnostics and the process-local CoreText experiment remain
+separate. Hardware identity is never rewritten.
 
-- **Japan Region** applies one verified, per-device Japan software-region
-  profile without changing hardware identity.
-- **Diagnostics** compares relevant MobileGestalt runtime/cache answers,
-  DeviceTree `/chosen`, iBoot `syscfg-*`, and MobileActivation region sources.
-- **CoreText GB18030** provides a binary-validated, process-local rendering experiment
-  and restores its temporary cached-byte override before returning.
+Locus uses private APIs and is intended for devices you own or are authorized to
+research. It is not affiliated with Apple.
 
-Locus uses private APIs and is intended only for devices you own or are
-authorized to research. It is not affiliated with Apple.
+## Current feature status
 
-## Compatibility and safety
+| Module | Implemented behavior | Write gate |
+| --- | --- | --- |
+| RegionCode | Existing string to J; independent exact-value restore | Typed existing key and file access |
+| RegionInfo | Existing old **or** current key to J/A; no alias synthesis | Exactly one existing string alias; dual aliases remain unsupported |
+| RegulatoryModelNumber | Japan model from the existing ProductType whitelist | Real device profile and typed existing key |
+| Apple Intelligence capability | A62OafQ85EJAiiqKn4agtg to Boolean true/integer 1; restore original type or absence | Missing or canonical Boolean/integer 0 or 1 and file access |
+| green-tea / not-green-tea / wapi | Independent descriptor diagnostics, bounded patches and restore | Exact binary review, cache identity/version/length, canonical values/validity and file access |
+| MobileActivation | Independent diagnostics, schema planning and transactional restore path | Verified container identity, existing file, schema and reviewed storage/consumer binary semantics |
+| CoreText GB18030 | Loaded UUID probe and temporary process-local rendering experiment | Reviewed predicate/data references and existing writable memory |
+| Full Japan Region | All identity, three cache behaviors and activation sources in one transaction | Every prerequisite must pass; AI and CoreText are independent |
 
-Capability checks are per feature:
+**No current MobileGestalt semantic review, MobileActivation storage/consumer
+fingerprint or CoreText fingerprint is registered. Those writes remain disabled.**
+Independent identity and AI actions do not depend on those reviews. They still
+require authorized on-device file access; host tests do not prove that access.
 
-- Read-only Runtime Diagnostics has no global OS-build gate. Individual private
-  APIs and backing files may still be unavailable on untested systems.
-- Japan Region requires a reviewed question-to-slot mapping identified by
-  `CacheUUID`, typed CacheExtra fields, a current cache version, canonical
-  boolean/valid bytes, bounded offsets and a verified device profile. The
-  inherited `0x1947` layout (`0x0BF0/0x17F6`, `0x0FC8/0x1871`,
-  `0x15A8/0x192D`) is retained independently of OS build.
-- **No reviewed CacheUUID/descriptor evidence was supplied with the original
-  offsets. The schema registry is intentionally empty: Japan Region mutation
-  currently refuses all layouts, including on `24A5390f`.** Equal blob length
-  or matching boolean answers cannot prove the meaning of an offset. Existing
-  Japan-like settings remain visible as unverified. Read-only diagnostics work
-  independently. A reviewed schema can be reused across builds without a
-  version allowlist; this migration does not claim on-device compatibility.
-- CoreText checks the loaded Mach-O UUID before considering any recovered
-  address, then requires section, complete memory-range and protection checks.
-  **The original source also had no reviewed CoreText binary fingerprint, so
-  the experimental override is currently disabled on all binaries.** Its
-  read-only probe remains available, and it does not gate other features.
-- MobileActivation accepts only the existing unambiguous string-field schema
-  with valid country/region codes and UInt32 SoftwareBehaviors semantics. It
-  retains inode-preserving writes, read-back verification and exact rollback.
+The dynamic scanner snapshots the process's loaded MobileGestalt image using
+checked Mach VM reads. It examines __TEXT.__cstring and relevant __const sections
+in __AUTH_CONST, __DATA_CONST and __DATA, with segment/section/ASLR bounds checks.
+The 64-byte descriptor, +0x3A index and +0x3C type-11 Boolean are hypotheses.
+Its five levels are Unavailable, Candidate, Structurally Valid, Binary Verified
+and Writable. A masked PAC pointer match, a unique cstring UUID, matching answers,
+or 8N+N bytes alone never grants write permission. wapi is scanned independently;
+there is no historical-offset fallback.
 
-Japan Region mutation is inherently risky. Locus refuses unknown ProductTypes
-instead of guessing, uses the real `hw.machine` ProductType to select a verified
-Japanese regulatory model, and never writes ProductType, HWModelStr,
-HardwarePlatform, CPU identity, or WSKU.
+Identity changes touch only their allowed CacheExtra key. RegionCode and sales
+region are independent. RegionInfo never adds a second alias; when both aliases
+exist, diagnostics show both and writes require further semantic review. The AI
+capability flag does not establish Settings visibility, model-download access
+or working Apple Intelligence services.
 
-Before either persistent source is changed, Locus stores byte-exact backups of
-both MobileGestalt and MobileActivation `region_info.plist`. It preserves the
-backing inodes, reads both sources back, verifies every expected value, and
-rolls back in reverse order if any stage fails. Backups are internal transaction
-artifacts in the app's Documents container; there is intentionally no general
-plist editor or arbitrary restore UI.
+## Backups, transactions and recovery
 
-The CoreText experiment is not a persistent system patch. It initializes the
-predicate through normal UIKit/CoreText rendering, temporarily changes only an
-already-writable process-local cached byte, saves and restores the original byte
-in cleanup, and verifies restoration. It never changes page protection or the
-CoreText once token.
+All persistent actions use one serialized coordinator and an inode-preserving
+compare-and-replace writer. Before writing it saves complete original and intended
+file bytes, SHA-256 checksums, a fixed key/byte whitelist, device model/build and
+a durable transaction phase. Exact current bytes must still match before each
+write. Complete readback verifies the result; failures roll back in reverse order
+and report verified rollback or recovery required.
+
+The new Documents/Region Module Backups directory contains immutable first-module
+baseline references and per-operation journals. Legacy Japan Region Transaction
+Backups and user-saved originals are retained. Original means the state before
+Locus's first edit, **not factory provenance**. An already-J/A no-op creates no
+invented original. Restore changes only the selected module's exact saved values
+(including AI key absence and validity bytes), preserving other modules. A system
+update or external target-field change requires review instead of forced restore.
+
+After interruption, writes to the affected source are blocked until its journal is recovered; a standalone activation failure does not block unrelated MobileGestalt modules.
+Preparing/prepared phases cannot have written system files and are closed without
+overwriting external changes. A full transaction requires both source plans inside the coordinator itself.
+Writing/rollback phases accept only exact original
+or intended file contents. Unrecognized torn/corrupt contents retain the original
+backups and require manual investigation; in-place truncation cannot promise
+power-loss atomicity or a cross-inode atomic commit. Do not delete the app or its container while recovery is
+outstanding. Export the app container through Xcode before reinstalling.
+
+CoreText never changes system files, memory page protection or the once token.
+Its reviewed-path experiment restores its one cached byte in cleanup and uses
+identical rendering inputs for baseline/override/restored controls. Glyph-cache
+reuse can still make rendering comparisons inconclusive. It is independent of
+the system RegionalBehaviorGB18030 answer.
+
+See [the review and device acceptance procedure](docs/region-modules-review.md)
+for evidence gaps, risks, changed files and iPhone18,3 / 24B119 checks.
 
 ## Building and signing
 
@@ -115,13 +134,13 @@ Persistent mutation and CoreText address validation require on-device testing.
 
 ## Architecture
 
-- `Region/` — verified ProductType profiles, exact CacheData mutation, Swift
-  transaction orchestration, backups, verification, rollback, and UI
+- `Region/` — independent planners, descriptor assessments, ProductType profiles,
+  fixed write scopes, immutable originals, SHA-256 journals and transaction UI
 - `Diagnostics/` — the compact read-only diagnostics model and UI
 - `CoreText/` — loaded-binary CoreText validation/experiment and rendering UI
 - `LowLevel/` — focused Objective-C bridges for MobileGestalt,
   MobileActivation, DeviceTree/IOKit, and worse_query
-- `Support/` — the retained post-write SpringBoard refresh implementation
+- `Support/` — the retained optional SpringBoard refresh implementation
 
 ## Licensing and attribution
 
@@ -140,13 +159,20 @@ automation or backup UI was imported.
 ## Regression checks
 
 ```sh
-sh Scripts/test-portable.sh  # actual temporary-directory C tests and static checks
-sh Scripts/test-macos.sh    # macOS Foundation/Swift host regressions
+sh Scripts/test-portable.sh  # C sanitizer/Python checks; also Swift when available
+sh Scripts/test-swift.sh     # actual pure Swift planner/scanner/coordinator/service
+sh Scripts/test-macos.sh     # macOS Objective-C/Mach-O bridge and Swift regressions
 ```
 
-The macOS suite tests signing/query/handle behavior using simulated private APIs,
-the actual plist schema parser and in-place writers using temporary files,
-CacheData rejection/bounds, exact backup bytes, and the actual Swift transaction
-orchestrator with simulated I/O failures. None is a real-device test. See
-[the migration and validation report](docs/worse-query-migration.md) for commits,
-file changes, executed checks, outstanding native builds and device limitations.
+The Swift suite runs the actual planners, scanner and journal engine with synthetic
+fixtures and simulated I/O. If the two local device snapshots exist, an optional
+read-only test also checks in-memory edits and exact restore against them; they
+are not bundled or published. Native tests exercise checked loaded-image reads
+with synthetic Mach-O headers and the actual writer on temporary files.
+The macOS suite also checks signing/query/handle behavior with simulated private
+APIs. None is an on-device compatibility or functional test.
+
+The Linux review environment ran the portable and Swift suites. macOS native
+regressions and unsigned iOS Debug/Release builds require Apple SDKs and are
+pending; no IPA or real-device validation is claimed. Details are recorded in
+[the review report](docs/region-modules-review.md).

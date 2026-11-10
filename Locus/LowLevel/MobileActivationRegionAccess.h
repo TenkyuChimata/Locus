@@ -18,10 +18,8 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(readRegionData());
 - (BOOL)validateRegionData:(NSData *)data error:(NSError **)error
     NS_SWIFT_NAME(validateRegionData(_:));
-- (BOOL)applyJapanRegionWithError:(NSError **)error
-    NS_SWIFT_NAME(applyJapanRegion());
-- (BOOL)restoreRegionData:(NSData *)data error:(NSError **)error
-    NS_SWIFT_NAME(restoreRegionData(_:));
+- (BOOL)replaceRegionData:(NSData *)expected withData:(NSData *)replacement error:(NSError **)error
+    NS_SWIFT_NAME(replaceRegionData(_:with:));
 
 /// A concise comparison between the direct backing plist and the effective
 /// MAECopyDeviceRegionInfoWithError result. This method is read-only.

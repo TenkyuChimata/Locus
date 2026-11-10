@@ -6,6 +6,7 @@
 //
 
 #import "CoreTextGB18030Service.h"
+#import "../LowLevel/MobileGestaltImage.h"
 
 #import <UIKit/UIKit.h>
 
@@ -133,7 +134,7 @@ GEFindLoadedCoreTextImage(
 
         NSString *imageName = [NSString stringWithUTF8String:name];
 
-        if (!imageName || ![imageName hasSuffix:kGECoreTextImageSuffix]) {
+        if (!imageName || ![imageName isEqualToString:kGECoreTextImageSuffix]) {
             continue;
         }
 
@@ -166,21 +167,8 @@ GEFindLoadedCoreTextImage(
 
 static NSString *GECoreTextImageUUID(const struct mach_header_64 *header)
 {
-    if (!header || header->magic != MH_MAGIC_64 ||
-        header->ncmds > header->sizeofcmds / sizeof(struct load_command)) return nil;
-    const uint8_t *cursor = (const uint8_t *)(header + 1);
-    const uint8_t *end = cursor + header->sizeofcmds;
-    for (uint32_t i = 0; i < header->ncmds; i++) {
-        if ((size_t)(end - cursor) < sizeof(struct load_command)) return nil;
-        const struct load_command *command = (const struct load_command *)cursor;
-        if (command->cmdsize < sizeof(*command) || command->cmdsize > (size_t)(end - cursor)) return nil;
-        if (command->cmd == LC_UUID && command->cmdsize == sizeof(struct uuid_command)) {
-            const struct uuid_command *uuid = (const struct uuid_command *)command;
-            return [[NSUUID alloc] initWithUUIDBytes:uuid->uuid].UUIDString;
-        }
-        cursor += command->cmdsize;
-    }
-    return nil;
+    if (!header) return nil;
+    return LocusLoadedImageIdentity(kGECoreTextImageSuffix)[@"binaryUUID"];
 }
 
 static BOOL GECoreTextBinaryReviewed(const struct mach_header_64 *header)
@@ -690,6 +678,8 @@ GERenderEmojiSample(CGFloat fontSize)
                 : (id)NSNull.null,
             @"staticImageBase": GEHexAddress(kGECoreTextStaticImageBase)
         }];
+    result[@"scope"] = @"Process-local rendering experiment; independent of system RegionalBehaviorGB18030.";
+    result[@"verificationStatus"] = @"Binary UUID alone does not verify predicate semantics or global addresses.";
 
     [result addEntriesFromDictionary:
         GESharedCacheDiagnostics(header)];
@@ -902,7 +892,7 @@ GERenderEmojiSample(CGFloat fontSize)
         // Render through the same public UIKit/CoreText path while the cached
         // answer is forced false. The once token is already complete, so the
         // recovered CoreText predicate's fast path reads this byte directly.
-        forcedPNG = GERenderEmojiSample(72.0);
+        forcedPNG = GERenderEmojiSample(70.0);
     }
     @catch (NSException *exception) {
         caughtException = exception;
@@ -963,9 +953,10 @@ GERenderEmojiSample(CGFloat fontSize)
     }
 
     // Create a post-restore control only after the byte has been restored.
-    // A slightly different font size is deliberate: it reduces the chance of
-    // an already-created color-glyph image object being reused across draws.
-    restoredPNG = GERenderEmojiSample(74.0);
+    // Identical rendering inputs avoid confusing font-size differences with
+    // region behavior. CoreText glyph-cache reuse can still mask an effect;
+    // identical images therefore remain inconclusive, not a semantic proof.
+    restoredPNG = GERenderEmojiSample(70.0);
 
     if (!restoredPNG) {
         if (error) {
@@ -1005,6 +996,10 @@ GERenderEmojiSample(CGFloat fontSize)
                 cachedPredicateRestored == cachedPredicateBefore
             ),
             @"predicateMeasurement": @"direct cached-byte observation; no private predicate function pointer call",
+            @"renderInputsIdentical": @YES,
+            @"baselineEqualsForcedPNG": @([baselinePNG isEqualToData:forcedPNG]),
+            @"baselineEqualsRestoredPNG": @([baselinePNG isEqualToData:restoredPNG]),
+            @"renderInterpretation": @"Byte equality is measured separately. PNG equality or differences alone do not prove GB18030 semantics; retained glyph caches may hide a change.",
             @"baselinePNG": baselinePNG,
             @"forcedPNG": forcedPNG,
             @"restoredPNG": restoredPNG,

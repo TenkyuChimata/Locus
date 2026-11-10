@@ -14,6 +14,9 @@ struct RuntimeDiagnosticQuestion: Identifiable {
 let runtimeDiagnosticQuestions: [RuntimeDiagnosticQuestion] = [
     .init(title: "RegionCode", query: "RegionCode", cacheKey: JapanRegionMutation.regionCodeKey, group: .region),
     .init(title: "RegionInfo", query: "RegionInfo", cacheKey: JapanRegionMutation.regionInfoKey, group: .region),
+    .init(title: "RegionInfo legacy key", query: "yK+xavymRGZ3xWc1tb8XDg", cacheKey: "yK+xavymRGZ3xWc1tb8XDg", group: .region),
+    .init(title: "RegionInfo current key candidate", query: "zHeENZu+wbg7PUprwNwBWg", cacheKey: "zHeENZu+wbg7PUprwNwBWg", group: .region),
+    .init(title: "Apple Intelligence Capability", query: RegionModuleMutation.intelligenceKey, cacheKey: RegionModuleMutation.intelligenceKey, group: .region),
     .init(title: "RegulatoryModelNumber", query: "RegulatoryModelNumber", cacheKey: JapanRegionMutation.regulatoryModelKey, group: .region),
     .init(title: "WSKU", query: "gD8SNRcHQeIxCAvsp+2vjA", cacheKey: "gD8SNRcHQeIxCAvsp+2vjA", group: .hardware),
     .init(title: "green-tea", query: "green-tea", cacheKey: "iyfxmLogGVIaH7aEgqwcIA", group: .region),
@@ -42,6 +45,8 @@ final class RuntimeDiagnosticsService: ObservableObject {
     @Published private(set) var runtimeAnswers: [String: Any] = [:]
     @Published private(set) var cacheExtra: [String: Any] = [:]
     @Published private(set) var cacheLayout: [String: Any] = [:]
+    @Published private(set) var cacheMapping: [CacheMappingAssessment] = []
+    @Published private(set) var imageIdentity: [String: Any] = [:]
     @Published private(set) var chosenProperties: [String: Any] = [:]
     @Published private(set) var syscfgProperties: [String: Any] = [:]
     @Published private(set) var activation: [String: Any] = [:]
@@ -59,9 +64,13 @@ final class RuntimeDiagnosticsService: ObservableObject {
         let deviceTree = DeviceTreeAccess.shared()
         let gestalt = MobileGestaltAccess.shared()
 
+
         // Preserve the existing first-touch ordering: collect the direct MAE
         // result before asking MobileGestalt for activation-derived answers.
         activation = activationAccess.regionDiagnostics()
+        imageIdentity = RegionCacheMapping.loadedImage()
+        cacheMapping = RegionCacheMapping.assess(plist: [:], build: MobileGestaltAccess.currentOSBuild(),
+            image: imageIdentity, writeAccess: false)
 
         do {
             chosenProperties = try deviceTree.chosenProperties(
@@ -86,6 +95,8 @@ final class RuntimeDiagnosticsService: ObservableObject {
                 cacheLayout = JapanRegionCacheLayout.diagnostics(
                     plist: plist, build: MobileGestaltAccess.currentOSBuild()
                 )
+                cacheMapping = RegionCacheMapping.assess(plist: plist, build: MobileGestaltAccess.currentOSBuild(),
+                    image: imageIdentity, writeAccess: false)
             } else {
                 cacheExtra = [:]
                 cacheLayout = [:]

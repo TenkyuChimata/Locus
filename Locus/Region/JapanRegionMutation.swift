@@ -11,12 +11,14 @@ enum JapanRegionMutation {
         build: String
     ) throws {
         guard let extra = plist["CacheExtra"] as? [String: Any],
-              [regionCodeKey, regionInfoKey, regulatoryModelKey].allSatisfy({
+              [regionCodeKey, regulatoryModelKey].allSatisfy({
                   guard let value = extra[$0] as? String else { return false }
                   return !value.isEmpty
               }) else {
             throw JapanRegionError.invalidMobileGestalt
         }
+        let infoKey = try RegionModuleMutation.identityKey(.regionInfo, extra: extra)
+        guard let info = extra[infoKey] as? String, !info.isEmpty else { throw JapanRegionError.invalidMobileGestalt }
         _ = try JapanRegionCacheLayout.resolve(plist: plist, build: build)
         guard JapanRegionProfile.verified(for: profile.productType) == profile else {
             throw JapanRegionError.unsupportedProductType(profile.productType)
@@ -36,7 +38,7 @@ enum JapanRegionMutation {
 
         // Software identity only. Hardware identity answers are never written.
         cacheExtra[regionCodeKey] = "J"
-        cacheExtra[regionInfoKey] = "J/A"
+        cacheExtra[try RegionModuleMutation.identityKey(.regionInfo, extra: cacheExtra)] = "J/A"
         cacheExtra[regulatoryModelKey] = profile.regulatoryModel
 
         let layout = try JapanRegionCacheLayout.resolve(plist: plist, build: build)
@@ -57,7 +59,8 @@ enum JapanRegionMutation {
               let cacheData = plist["CacheData"] as? Data,
               let layout = try? JapanRegionCacheLayout.resolve(plist: plist, build: build),
               cacheExtra[regionCodeKey] as? String == "J",
-              cacheExtra[regionInfoKey] as? String == "J/A",
+              let infoKey = try? RegionModuleMutation.identityKey(.regionInfo, extra: cacheExtra),
+              cacheExtra[infoKey] as? String == "J/A",
               cacheExtra[regulatoryModelKey] as? String == profile.regulatoryModel else {
             return false
         }

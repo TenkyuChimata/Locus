@@ -1,4 +1,6 @@
+#if canImport(Darwin)
 import Darwin
+#endif
 import Foundation
 
 struct JapanRegionProfile: Equatable, Sendable {
@@ -102,6 +104,7 @@ struct JapanRegionProfile: Equatable, Sendable {
 
 enum RealDeviceIdentity {
     static var productType: String {
+        #if canImport(Darwin)
         var size = 0
         guard sysctlbyname("hw.machine", nil, &size, nil, 0) == 0,
               size > 1 else { return "" }
@@ -110,5 +113,8 @@ enum RealDeviceIdentity {
             return ""
         }
         return String(cString: bytes)
+        #else
+        return "" // Host tests never pretend to be an iOS device.
+        #endif
     }
 }

@@ -1,320 +1,275 @@
+// SPDX-License-Identifier: GPL-3.0-only
+#if canImport(Combine)
 import Combine
+#endif
 import Foundation
 
-enum RegionConfigurationState: Equatable, Sendable {
-    case verified
-    case japanLikeUnverified
-    case notApplied
-    case unavailable
+struct RegionModuleStatus: Identifiable {
+    let module: RegionModule
+    var id: RegionModule { module }
+    let cache: String
+    let runtime: String
+    let expected: String
+    let access: String
+    let verification: String
+    let detail: String
+    let originalAvailable: Bool
+    let canApply: Bool
+    let canRestore: Bool
 }
 
-struct RegionIdentitySnapshot {
-    let build: String
-    let productType: String
-    let profile: JapanRegionProfile?
-    let regionCode: String
-    let regionInfo: String
-    let regulatoryModel: String
-    let activationCountry: String
-    let activationRegion: String
-    let activationBehaviors: String
-    let layoutSupported: Bool
-    let mutationPathReady: Bool
-    let configurationState: RegionConfigurationState
-    let readinessDetail: String
+final class NativeRegionFileAccess: RegionFileAccess {
+    func read(_ file: RegionFile) throws -> Data {
+        switch file {
+        case .mobileGestalt: return try MobileGestaltAccess.shared().readCacheData()
+        case .mobileActivation: return try MobileActivationRegionAccess.shared().readRegionData()
+        }
+    }
+    func replace(_ file: RegionFile, expected: Data, replacement: Data) throws {
+        switch file {
+        case .mobileGestalt: try MobileGestaltAccess.shared().replaceCacheData(expected, with: replacement)
+        case .mobileActivation: try MobileActivationRegionAccess.shared().replaceRegionData(expected, with: replacement)
+        }
+    }
 }
 
 @MainActor
 final class RegionIdentityService: ObservableObject {
-    @Published private(set) var snapshot: RegionIdentitySnapshot?
+    @Published private(set) var modules: [RegionModuleStatus] = []
     @Published private(set) var isBusy = false
     @Published private(set) var operationResult: String?
     @Published private(set) var errorMessage: String?
+    @Published private(set) var recoveryDetail: String?
+    @Published private(set) var comparisons: [String] = []
+    @Published private(set) var build = ""
+    @Published private(set) var productType = ""
+    @Published private(set) var binaryUUID = "<unavailable>"
     @Published var shouldRespring = false
 
     private let gestalt = MobileGestaltAccess.shared()
     private let activation = MobileActivationRegionAccess.shared()
+    private let backupRoot: URL?
+    private let fileAccess: RegionFileAccess
+    private let deviceContext: () -> (productType: String, build: String)
+    private var activationInfo: [String: Any] = ["mutationSchemaSupported": false,
+        "mutationSchemaError": "MobileActivation research has not been refreshed. Use its independent research refresh."]
+    private var activationObservedAt: Date?
 
-    func refresh() {
+    init(backupRoot: URL? = nil, access: RegionFileAccess? = nil,
+         deviceContext: (() -> (productType: String, build: String))? = nil) {
+        self.backupRoot = backupRoot
+        self.fileAccess = access ?? NativeRegionFileAccess()
+        self.deviceContext = deviceContext ?? { (RealDeviceIdentity.productType, MobileGestaltAccess.currentOSBuild()) }
+    }
+
+    private func coordinator() throws -> RegionTransactionCoordinator {
+        let root: URL
+        if let backupRoot { root = backupRoot }
+        else {
+            root = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: true).appendingPathComponent("Region Module Backups", isDirectory: true)
+        }
+        let context = deviceContext()
+        return .init(root: root, access: fileAccess, productType: context.productType, build: context.build)
+    }
+
+    func refresh(includeActivation: Bool = false) {
         guard !isBusy else { return }
         isBusy = true
-        errorMessage = nil
         defer { isBusy = false }
-
-        let build = MobileGestaltAccess.currentOSBuild()
-        let productType = RealDeviceIdentity.productType
-        let profile = JapanRegionProfile.verified(for: productType)
-
-        do {
-            guard let plist = try gestalt.readCachePlist() as? [String: Any] else {
-                throw JapanRegionError.invalidMobileGestalt
-            }
-            let cacheExtra = plist["CacheExtra"] as? [String: Any]
-            let activationDiagnostics = activation.regionDiagnostics()
-            let layoutSupported = (try? JapanRegionCacheLayout.resolve(plist: plist, build: build)) != nil
-            let configurationState = classifyConfiguration(
-                plist: plist,
-                cacheExtra: cacheExtra,
-                activationDiagnostics: activationDiagnostics,
-                profile: profile,
-                build: build
-            )
-            var ready = false
-            var readiness = "Ready for verified transaction"
-
-            if let profile {
-                do {
-                    try JapanRegionMutation.validate(
-                        plist: plist,
-                        profile: profile,
-                        build: build
-                    )
-                    if (activationDiagnostics["mutationSchemaSupported"] as? NSNumber)?.boolValue == true {
-                        ready = true
-                    } else {
-                        readiness = "MobileActivation mutation schema is unavailable: "
-                            + display(activationDiagnostics["mutationSchemaError"])
-                    }
-                } catch {
-                    readiness = error.localizedDescription
-                }
-            } else {
-                if configurationState == .japanLikeUnverified {
-                    readiness = "Existing Japan-like persistent identity detected, but no verified "
-                        + "Japan profile exists for \(productType). Locus will not modify this device."
-                } else {
-                    readiness = JapanRegionError
-                        .unsupportedProductType(productType)
-                        .localizedDescription
-                }
-            }
-
-            snapshot = RegionIdentitySnapshot(
-                build: build,
-                productType: productType,
-                profile: profile,
-                regionCode: display(cacheExtra?[JapanRegionMutation.regionCodeKey]),
-                regionInfo: display(cacheExtra?[JapanRegionMutation.regionInfoKey]),
-                regulatoryModel: display(cacheExtra?[JapanRegionMutation.regulatoryModelKey]),
-                activationCountry: display(activationDiagnostics["backingCountryCode"]),
-                activationRegion: display(activationDiagnostics["backingRegionInfo"]),
-                activationBehaviors: display(activationDiagnostics["backingSoftwareBehaviors"]),
-                layoutSupported: layoutSupported,
-                mutationPathReady: ready,
-                configurationState: configurationState,
-                readinessDetail: readiness
-            )
-        } catch {
-            snapshot = RegionIdentitySnapshot(
-                build: build,
-                productType: productType,
-                profile: profile,
-                regionCode: "<unavailable>",
-                regionInfo: "<unavailable>",
-                regulatoryModel: "<unavailable>",
-                activationCountry: "<unavailable>",
-                activationRegion: "<unavailable>",
-                activationBehaviors: "<unavailable>",
-                layoutSupported: false,
-                mutationPathReady: false,
-                configurationState: .unavailable,
-                readinessDetail: error.localizedDescription
-            )
-            errorMessage = error.localizedDescription
+        let context = deviceContext()
+        build = context.build
+        productType = context.productType
+        var errors: [String] = []
+        // Independent identity/capability actions never require an activation
+        // query or container scan. Explicit research/full actions refresh it
+        // before making the MG queries in this observation.
+        if includeActivation {
+            activationInfo = activation.regionDiagnostics()
+            activationObservedAt = Date()
         }
+        var raw: Data?
+        var plist: [String: Any] = [:]
+        do {
+            raw = try fileAccess.read(.mobileGestalt)
+            plist = try RegionPlist.parse(raw!).root
+        } catch { errors.append("MobileGestalt: \(error.localizedDescription)") }
+        var runtime: [String: Any] = [:]
+        do {
+            runtime = try gestalt.runtimeAnswers(for: RegionModule.allCases.filter { $0 != .fullJapan && $0 != .mobileActivation }.map(\.runtimeQuery)
+                + RegionModuleMutation.regionInfoKeys)
+        } catch { errors.append("Runtime: \(error.localizedDescription)") }
+        let image = RegionCacheMapping.loadedImage()
+        binaryUUID = image["binaryUUID"] as? String ?? "<unavailable>"
+        let writeStatus = gestalt.cacheWriteAccessStatus()
+        let writeAccess = (writeStatus["writable"] as? NSNumber)?.boolValue == true
+        let assessments = RegionCacheMapping.assess(plist: plist, build: build, image: image, writeAccess: writeAccess)
+        var transactionStore: RegionTransactionCoordinator?
+        var blocked: String?
+        var pendingTransactions: [RegionJournal] = []
+        do {
+            let store = try coordinator()
+            transactionStore = store
+            let pending = try store.pending()
+            pendingTransactions = pending
+            recoveryDetail = pending.isEmpty ? nil : pending.map { "\($0.module.title): \($0.phase.rawValue) (\($0.id))" }.joined(separator: "\n")
+        } catch {
+            recoveryDetail = error.localizedDescription
+            blocked = "Backup/journal inspection failed: \(error.localizedDescription)"
+        }
+        if build.isEmpty || productType.isEmpty { blocked = "Running build or real ProductType is unavailable." }
+        let extra = plist["CacheExtra"] as? [String: Any] ?? [:]
+        var statuses: [RegionModuleStatus] = []
+        for module in RegionModule.allCases where module != .fullJapan {
+            let source: RegionFile = module == .mobileActivation ? .mobileActivation : .mobileGestalt
+            let moduleBlocked = blocked ?? (pendingTransactions.contains { $0.entries.contains { $0.file == source } }
+                ? "Recover the unfinished transaction touching this source before writing." : nil)
+            var current = "<unavailable>", runtimeValue = display(runtime[module.runtimeQuery])
+            var access = "Unavailable", detail = moduleBlocked.map { $0 + "\n" } ?? "", applicable = false
+            var original = false
+            var originalInvalid = false
+            do { original = try transactionStore?.originalAvailable(for: module) ?? false }
+            catch { originalInvalid = true; detail += "Original backup invalid: \(error.localizedDescription)\n" }
+            if module == .mobileActivation {
+                current = "\(display(activationInfo["backingCountryCode"])) / \(display(activationInfo["backingRegionInfo"])) / \(display(activationInfo["backingSoftwareBehaviors"]))"
+                runtimeValue = "\(display(activationInfo["effectiveCountryCode"])) / \(display(activationInfo["effectiveRegionInfo"])) / \(display(activationInfo["effectiveSoftwareBehaviors"]))"
+                applicable = (activationInfo["mutationSchemaSupported"] as? NSNumber)?.boolValue == true
+                access = applicable ? "Writable" : "Unsupported"
+                detail += display(activationInfo["mutationSchemaError"])
+                if let activationObservedAt {
+                    detail += " Last explicit research observation: \(activationObservedAt.formatted(date: .abbreviated, time: .standard)). Refresh research to observe again."
+                }
+            } else if let question = module.question, let item = assessments.first(where: { $0.question == question }) {
+                current = item.cacheValue.map { "\($0) (valid=\(item.valid.map(String.init) ?? "?"))" } ?? "<unavailable>"
+                access = item.status.rawValue
+                detail += item.reason
+                if let descriptor = item.descriptor {
+                    detail += " \(descriptor.section)+0x\(String(descriptor.offset, radix: 16)); index=\(descriptor.slot), type=\(descriptor.type)."
+                }
+                applicable = item.permitsMutation
+            } else {
+                do {
+                    let key = try RegionModuleMutation.identityKey(module, extra: extra)
+                    current = display(extra[key])
+                    guard let raw else { throw JapanRegionError.invalidMobileGestalt }
+                    _ = try RegionModuleMutation.plan(module: module, raw: raw, productType: productType, assessments: assessments)
+                    applicable = writeAccess
+                    access = writeAccess ? "Writable" : "Read-only"
+                    detail += "Existing key: \(key). Independent of CacheData and MobileActivation."
+                    if !writeAccess { detail += " " + display(writeStatus["error"]) }
+                } catch {
+                    access = "Unsupported"
+                    detail += error.localizedDescription
+                    if module == .regionInfo {
+                        current = RegionModuleMutation.regionInfoKeys.map { "\($0): \(display(extra[$0]))" }.joined(separator: "\n")
+                    }
+                }
+            }
+            statuses.append(.init(module: module, cache: current, runtime: runtimeValue, expected: expected(module),
+                access: access, verification: "Persistent and current-process observations only. Restart/function verification pending.",
+                detail: detail, originalAvailable: original, canApply: applicable && moduleBlocked == nil && !originalInvalid,
+                canRestore: original && moduleBlocked == nil && (module.question != nil || module == .mobileActivation ? applicable : writeAccess)))
+        }
+        let prerequisites = statuses.filter { $0.module != .intelligence }
+        var fullReady = prerequisites.allSatisfy(\.canApply)
+        var fullOriginal = false
+        do { fullOriginal = try transactionStore?.originalAvailable(for: .fullJapan) ?? false }
+        catch { fullReady = false; errors.append("Full transaction backup: \(error.localizedDescription)") }
+        statuses.append(.init(module: .fullJapan, cache: "See individual source values above", runtime: "See independent runtime values above",
+            expected: "J / J/A / verified model; false / true / false; activation JP / J/A / 25",
+            access: fullReady ? "Writable" : "Unsupported",
+            verification: "All persistent sources must pass together. AI capability is an independent option.",
+            detail: prerequisites.map { "\($0.module.title): \($0.canApply ? "ready" : $0.access)" }.joined(separator: "\n"),
+            originalAvailable: fullOriginal, canApply: fullReady, canRestore: fullOriginal && fullReady))
+        modules = statuses
+        errorMessage = errors.isEmpty ? nil : errors.joined(separator: "\n")
     }
 
-    func applyJapanRegion() {
+    func apply(_ module: RegionModule) {
+        refresh(includeActivation: module == .mobileActivation || module == .fullJapan)
         guard !isBusy else { return }
-        isBusy = true
-        errorMessage = nil
-        operationResult = nil
-        shouldRespring = false
-
-        var originalGestalt: Data?
-        var originalActivation: Data?
-        var wroteGestalt = false
-        var wroteActivation = false
-
-        do {
-            let build = MobileGestaltAccess.currentOSBuild()
-            let productType = RealDeviceIdentity.productType
-            guard let profile = JapanRegionProfile.verified(for: productType) else {
-                throw JapanRegionError.unsupportedProductType(productType)
-            }
-
-            // Both exact source backups are durably created before either
-            // persistent file is modified.
-            let transactionBackup = try TransactionBackupStore.begin()
-            let gestaltData = try gestalt.readCacheData()
-            originalGestalt = gestaltData
-            try transactionBackup.saveMobileGestalt(gestaltData)
-
-            let activationData = try activation.readRegionData()
-            try activation.validateRegionData(activationData)
-            originalActivation = activationData
-            try transactionBackup.saveMobileActivation(activationData)
-
-            guard let originalPlist = parsePlist(gestaltData) else {
-                throw JapanRegionError.invalidMobileGestalt
-            }
-            let updatedPlist = try JapanRegionMutation.applying(
-                to: originalPlist,
-                profile: profile,
-                build: build
-            )
-
-            wroteActivation = true
-            try activation.applyJapanRegion()
-            try verifyActivation()
-
-            wroteGestalt = true
-            try gestalt.saveCachePlist(updatedPlist)
-
-            guard let verifiedPlist = try gestalt.readCachePlist() as? [String: Any],
-                  JapanRegionMutation.isApplied(
-                    to: verifiedPlist,
-                    profile: profile,
-                    build: build
-                  ) else {
-                throw JapanRegionError.mobileGestaltVerificationFailed
-            }
-            try verifyActivation()
-
-            isBusy = false
-            operationResult = "Verified both persistent sources. SpringBoard will refresh."
-            refresh()
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(900))
-                shouldRespring = true
-            }
-        } catch {
-            let primary = error
-            var rollbackErrors: [String] = []
-
-            // Reverse transaction order: MobileGestalt, then MobileActivation.
-            if wroteGestalt, let originalGestalt {
-                do {
-                    try gestalt.restoreCacheData(originalGestalt)
-                    guard try gestalt.readCacheData() == originalGestalt else {
-                        throw CocoaError(.fileReadCorruptFile)
-                    }
-                } catch {
-                    rollbackErrors.append("MobileGestalt: \(error.localizedDescription)")
-                }
-            }
-            if wroteActivation, let originalActivation {
-                do {
-                    try activation.restoreRegionData(originalActivation)
-                    guard try activation.readRegionData() == originalActivation else {
-                        throw CocoaError(.fileReadCorruptFile)
-                    }
-                } catch {
-                    rollbackErrors.append("MobileActivation: \(error.localizedDescription)")
-                }
-            }
-
-            isBusy = false
-            let finalError: String
-            if rollbackErrors.isEmpty {
-                finalError = primary.localizedDescription
+        guard modules.first(where: { $0.module == module })?.canApply == true else {
+            operationResult = nil; comparisons = []
+            errorMessage = "\(module.title) is unsupported or has incomplete prerequisites. No persistent write was attempted."
+            return
+        }
+        run(refreshActivation: module == .mobileActivation || module == .fullJapan) {
+            let plans: [RegionWritePlan]
+            if module == .mobileActivation {
+                let raw = try fileAccess.read(.mobileActivation)
+                try activation.validateRegionData(raw)
+                plans = [try RegionModuleMutation.activationPlan(raw: raw)]
+            } else if module == .fullJapan {
+                plans = try fullPlans()
             } else {
-                finalError = JapanRegionError.rollbackFailed(
-                    primary: primary.localizedDescription,
-                    rollback: rollbackErrors.joined(separator: "\n")
-                ).localizedDescription
+                let raw = try fileAccess.read(.mobileGestalt)
+                let root = try RegionPlist.parse(raw).root
+                let assessments = RegionCacheMapping.assess(plist: root, build: build,
+                    image: RegionCacheMapping.loadedImage(), writeAccess: (gestalt.cacheWriteAccessStatus()["writable"] as? NSNumber)?.boolValue == true)
+                plans = [try RegionModuleMutation.plan(module: module, raw: raw, productType: productType, assessments: assessments)]
             }
-            refresh()
-            errorMessage = finalError
+            comparisons = plans.flatMap(\.comparison)
+            return try coordinator().apply(module: module, plans: plans)
         }
     }
 
-    private func verifyActivation() throws {
-        let data = try activation.readRegionData()
-        guard let plist = parsePlist(data),
-              stringValue(plist, keys: ["DeviceRegionCountryCode", "CountryCode", "Region"]) == "JP",
-              stringValue(plist, keys: ["DeviceRegionRegionInfo", "RegionInfo"]) == "J/A",
-              parseBehavior(plist, keys: ["DeviceRegionSoftwareBehaviors", "SoftwareBehaviors"]) == 0x19 else {
-            throw JapanRegionError.activationVerificationFailed
+    func restore(_ module: RegionModule) {
+        refresh(includeActivation: module == .mobileActivation || module == .fullJapan)
+        guard !isBusy, modules.first(where: { $0.module == module })?.canRestore == true else {
+            operationResult = nil; comparisons = []
+            errorMessage = "No compatible original backup or writable restore path is available."
+            return
+        }
+        run(refreshActivation: module == .mobileActivation || module == .fullJapan) {
+            try coordinator().restore(module: module) { self.comparisons = $0.flatMap(\.comparison) }
         }
     }
 
-    private func parsePlist(_ data: Data) -> [String: Any]? {
-        try? PropertyListSerialization.propertyList(
-            from: data,
-            options: [],
-            format: nil
-        ) as? [String: Any]
+    func recover() { run { try coordinator().recoverPending() } }
+    func refreshResearch() { refresh(includeActivation: true) }
+    func applyJapanRegion() { apply(.fullJapan) }
+
+    private func run(refreshActivation: Bool = false, _ operation: () throws -> String) {
+        guard !isBusy else { return }
+        isBusy = true; errorMessage = nil; operationResult = nil; shouldRespring = false
+        var result: String?, failure: String?
+        do { result = try operation() } catch { failure = error.localizedDescription }
+        isBusy = false
+        refresh(includeActivation: refreshActivation)
+        operationResult = result
+        if let failure { errorMessage = failure }
     }
 
-    private func stringValue(_ plist: [String: Any], keys: [String]) -> String? {
-        keys.lazy.compactMap { plist[$0] as? String }.first
+    private func fullPlans() throws -> [RegionWritePlan] {
+        let mg = try fileAccess.read(.mobileGestalt)
+        let parsed = try RegionPlist.parse(mg)
+        guard let profile = JapanRegionProfile.verified(for: productType) else { throw JapanRegionError.unsupportedProductType(productType) }
+        let modified = try JapanRegionMutation.applying(to: parsed.root, profile: profile, build: build)
+        let layout = try JapanRegionCacheLayout.resolve(plist: parsed.root, build: build)
+        let extra = parsed.root["CacheExtra"] as? [String: Any] ?? [:]
+        let scope = RegionPatchScope(extraKeys: [JapanRegionMutation.regionCodeKey,
+            try RegionModuleMutation.identityKey(.regionInfo, extra: extra), JapanRegionMutation.regulatoryModelKey],
+            byteOffsets: layout.fields.flatMap { Array(($0.slot * 8)..<($0.slot * 8 + 8)) + [layout.slotCount * 8 + $0.slot] },
+            cacheUUID: parsed.root["CacheUUID"] as? String, cacheVersion: parsed.root["CacheVersion"] as? String,
+            cacheLength: (parsed.root["CacheData"] as? Data)?.count)
+        let after = RegionPlist.equal(parsed.root, modified) ? mg :
+            try PropertyListSerialization.data(fromPropertyList: modified, format: parsed.format, options: 0)
+        let ma = try fileAccess.read(.mobileActivation)
+        try activation.validateRegionData(ma)
+        return [try RegionModuleMutation.activationPlan(raw: ma), .init(file: .mobileGestalt, before: mg, after: after, scope: scope)]
     }
 
-    private func parseBehavior(_ plist: [String: Any], keys: [String]) -> UInt32? {
-        for key in keys {
-            if let number = plist[key] as? NSNumber { return number.uint32Value }
-            if let string = plist[key] as? String {
-                let value = string.trimmingCharacters(in: .whitespacesAndNewlines)
-                if value.lowercased().hasPrefix("0x") {
-                    return UInt32(value.dropFirst(2), radix: 16)
-                }
-                return UInt32(value, radix: 10)
-            }
+    private func expected(_ module: RegionModule) -> String {
+        if let question = module.question { return String(question.target) }
+        switch module {
+        case .regionCode: return "J"
+        case .regionInfo: return "J/A"
+        case .regulatoryModel: return JapanRegionProfile.verified(for: productType)?.regulatoryModel ?? "No verified model"
+        case .intelligence: return "true / 1 (capability flag only)"
+        case .mobileActivation: return "JP / J/A / 25 (0x19)"
+        default: return "See prerequisites"
         }
-        return nil
     }
-
-    private func classifyConfiguration(
-        plist: [String: Any],
-        cacheExtra: [String: Any]?,
-        activationDiagnostics: [String: Any],
-        profile: JapanRegionProfile?,
-        build: String
-    ) -> RegionConfigurationState {
-        guard let cacheExtra,
-              (activationDiagnostics["backingReadSucceeded"] as? NSNumber)?.boolValue == true else {
-            return .unavailable
-        }
-
-        let activationMatches = activationIsJapan(activationDiagnostics)
-        let mobileGestaltMatches = cacheExtra[JapanRegionMutation.regionCodeKey] as? String == "J"
-            && cacheExtra[JapanRegionMutation.regionInfoKey] as? String == "J/A"
-        if mobileGestaltMatches && activationMatches,
-           (try? JapanRegionCacheLayout.resolve(plist: plist, build: build)) == nil {
-            return .japanLikeUnverified
-        }
-        if let profile {
-            return JapanRegionMutation.isApplied(
-                to: plist,
-                profile: profile,
-                build: build
-            ) && activationMatches ? .verified : .notApplied
-        }
-
-        return mobileGestaltMatches && activationMatches
-            ? .japanLikeUnverified
-            : .notApplied
-    }
-
-    private func activationIsJapan(_ diagnostics: [String: Any]) -> Bool {
-        diagnostics["backingCountryCode"] as? String == "JP"
-            && diagnostics["backingRegionInfo"] as? String == "J/A"
-            && parseDisplayBehavior(diagnostics["backingSoftwareBehaviors"]) == 0x19
-    }
-
-    private func parseDisplayBehavior(_ value: Any?) -> UInt32? {
-        if let number = value as? NSNumber { return number.uint32Value }
-        if let string = value as? String {
-            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.lowercased().hasPrefix("0x") {
-                return UInt32(trimmed.dropFirst(2), radix: 16)
-            }
-            return UInt32(trimmed, radix: 10)
-        }
-        return nil
-    }
-
     private func display(_ value: Any?) -> String {
         guard let value, !(value is NSNull) else { return "<nil>" }
         return String(describing: value)

@@ -8,6 +8,8 @@
 
 #import "MobileActivationRegionAccess.h"
 #import "WorseQueryBridge.h"
+#import "InPlaceFileTransaction.h"
+#import "MobileGestaltImage.h"
 
 #import <dlfcn.h>
 #import <errno.h>
@@ -46,6 +48,16 @@ static NSString * const LocusMetadataIdentifier = @"MCMMetadataIdentifier";
 static const uint64_t LocusSystemGroupInodeLimit = 2000000ULL;
 
 static NSString *LocusCachedActivationSystemGroupPath = nil;
+
+static BOOL LocusActivationBinaryReviewed(void)
+{
+    // Registration requires an independent review tying this framework to the
+    // daemon's storage path, existence conditions and region schema/consumer.
+    // No matching current-system binary evidence has been supplied.
+    NSSet<NSString *> *reviewed = [NSSet set];
+    NSString *uuid = LocusLoadedImageIdentity(LocusActivationFramework)[@"binaryUUID"];
+    return uuid && [reviewed containsObject:uuid];
+}
 
 static NSError *LocusActivationError(NSInteger code, NSString *message)
 {
@@ -388,108 +400,6 @@ static NSArray<NSString *> *LocusBehaviorKeys(void)
     return @[@"DeviceRegionSoftwareBehaviors", @"SoftwareBehaviors"];
 }
 
-static BOOL LocusWriteAll(int fd, NSData *data)
-{
-    const uint8_t *bytes = data.bytes;
-    NSUInteger remaining = data.length;
-    while (remaining > 0) {
-        ssize_t written = write(fd, bytes, remaining);
-        if (written < 0 && errno == EINTR) {
-            continue;
-        }
-        if (written <= 0) {
-            return NO;
-        }
-        bytes += written;
-        remaining -= (NSUInteger)written;
-    }
-    return YES;
-}
-
-static BOOL LocusRewriteDescriptor(int fd, NSData *data)
-{
-    return fd >= 0 && data &&
-        ftruncate(fd, 0) == 0 &&
-        lseek(fd, 0, SEEK_SET) >= 0 &&
-        LocusWriteAll(fd, data) &&
-        fsync(fd) == 0;
-}
-
-static BOOL LocusRewriteExistingActivationFile(
-    NSString *path,
-    NSData *replacement,
-    NSInteger errorCode,
-    NSError **error
-)
-{
-    NSError *readError = nil;
-    NSData *original = [NSData dataWithContentsOfFile:path
-                                              options:0
-                                                error:&readError];
-    if (!original) {
-        if (error) {
-            *error = readError ?: LocusActivationError(
-                errorCode,
-                @"Could not read the original MobileActivation region data."
-            );
-        }
-        return NO;
-    }
-
-    int fd = open(path.fileSystemRepresentation,
-                  O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) {
-        if (error) {
-            *error = LocusActivationError(
-                errorCode + 1,
-                [NSString stringWithFormat:
-                    @"Could not open region_info.plist for an in-place rewrite (errno=%d).",
-                    errno]
-            );
-        }
-        return NO;
-    }
-
-    BOOL wrote = LocusRewriteDescriptor(fd, replacement);
-    int writeErrno = errno;
-    if (!wrote) {
-        (void)LocusRewriteDescriptor(fd, original);
-        close(fd);
-        if (error) {
-            *error = LocusActivationError(
-                errorCode + 2,
-                [NSString stringWithFormat:
-                    @"region_info.plist rewrite failed (errno=%d); original bytes were restored best-effort.",
-                    writeErrno]
-            );
-        }
-        return NO;
-    }
-    close(fd);
-
-    NSData *verification = [NSData dataWithContentsOfFile:path];
-    if (![verification isEqualToData:replacement]) {
-        int rollbackFD = open(path.fileSystemRepresentation,
-                              O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
-        if (rollbackFD >= 0) {
-            (void)LocusRewriteDescriptor(rollbackFD, original);
-            close(rollbackFD);
-        }
-        if (error) {
-            *error = LocusActivationError(
-                errorCode + 3,
-                @"region_info.plist verification failed; original bytes were restored best-effort."
-            );
-        }
-        return NO;
-    }
-
-    if (error) {
-        *error = nil;
-    }
-    return YES;
-}
-
 static NSString * _Nullable LocusResolveSystemGroupNormally(
     NSNumber * _Nullable *statusOut,
     NSString * _Nullable *detailOut
@@ -581,21 +491,17 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
     }];
     diagnostics[@"discovery"] = discovery;
     if (normalPath.length > 0) {
+        if (!LocusIsSystemGroupCandidate(normalPath) || status.unsignedLongLongValue != 0) {
+            NSError *identityError = LocusActivationError(12, @"Resolver path/status failed SystemGroup identity scope validation.");
+            LocusRecordFailure(diagnostics, @"resolver-identity", identityError);
+            if (error) *error = identityError;
+            return nil;
+        }
         discovery[@"source"] = @"normal-resolver";
         if (error) {
             *error = nil;
         }
         return normalPath;
-    }
-
-    @synchronized (MobileActivationRegionAccess.class) {
-        if (LocusCachedActivationSystemGroupPath.length > 0) {
-            discovery[@"source"] = @"cached-metadata-match";
-            if (error) {
-                *error = nil;
-            }
-            return [LocusCachedActivationSystemGroupPath copy];
-        }
     }
 
     NSString *configurationError = WorseQueryAccessConfigurationError();
@@ -645,6 +551,11 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
     // only this known identifier, without expanding the inode range. It still
     // requires a metadata identity match; basename alone never authorizes it.
     NSMutableOrderedSet<NSString *> *metadataCandidates = [NSMutableOrderedSet new];
+    // A previously identified path is only a candidate on the next operation.
+    // Its metadata identity must be read again; a cached path is not authority.
+    @synchronized (MobileActivationRegionAccess.class) {
+        if (LocusCachedActivationSystemGroupPath) [metadataCandidates addObject:LocusCachedActivationSystemGroupPath];
+    }
     for (NSString *candidate in candidates) [metadataCandidates addObject:LocusLeaseAliasPath(candidate)];
     NSString *named = [LocusSystemGroupRoot stringByAppendingPathComponent:LocusActivationSystemGroup];
     BOOL namedScanned = [metadataCandidates containsObject:named];
@@ -906,127 +817,21 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
     }
 }
 
-- (BOOL)applyJapanRegionWithError:(NSError **)error
+- (BOOL)replaceRegionData:(NSData *)expected withData:(NSData *)replacement error:(NSError **)error
 {
     @synchronized (self) {
-        NSString *readPath = nil;
-        WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, error, nil);
-        if (!lease) {
-            return NO;
-        }
-
+        NSString *path = nil;
+        WorseQueryLease *lease = LocusAcquireRegionLease(&path, error, nil);
+        if (!lease) return NO;
         @try {
-            NSData *original = [NSData dataWithContentsOfFile:readPath];
-            if (!original) {
-                if (error) {
-                    *error = LocusActivationError(22, @"Failed to read region_info.plist before mutation.");
-                }
-                return NO;
-            }
-
-            NSPropertyListFormat format = NSPropertyListBinaryFormat_v1_0;
-            NSError *parseError = nil;
-            NSDictionary *parsed = LocusParsePlistData(
-                original,
-                NSPropertyListMutableContainers,
-                &format,
-                &parseError
-            );
-            if (!parsed) {
-                if (error) {
-                    *error = parseError ?: LocusActivationError(23, @"region_info.plist is not a dictionary.");
-                }
-                return NO;
-            }
-
-            if (!LocusValidateRegionSchema(parsed, error)) return NO;
-            NSMutableDictionary *region = [parsed mutableCopy];
-            NSString *countryKey = LocusExistingKey(region, LocusCountryKeys());
-            NSString *regionKey = LocusExistingKey(region, LocusRegionKeys());
-            NSString *behaviorKey = LocusExistingKey(region, LocusBehaviorKeys());
-            if (!countryKey || !regionKey || !behaviorKey) {
-                if (error) {
-                    *error = LocusActivationError(
-                        24,
-                        [NSString stringWithFormat:
-                            @"Unexpected region_info.plist schema; existing keys: %@",
-                            [[region allKeys] componentsJoinedByString:@", "]]
-                    );
-                }
-                return NO;
-            }
-
-            region[countryKey] = @"JP";
-            region[regionKey] = @"J/A";
-            // MobileGestaltExtensions validates this value as CFString.
-            region[behaviorKey] = @"25";
-
-            if (format != NSPropertyListXMLFormat_v1_0 &&
-                format != NSPropertyListBinaryFormat_v1_0) {
-                format = NSPropertyListBinaryFormat_v1_0;
-            }
-            NSError *serializationError = nil;
-            NSData *updated = [NSPropertyListSerialization
-                dataWithPropertyList:region
-                              format:format
-                             options:0
-                               error:&serializationError];
-            if (!updated) {
-                if (error) {
-                    *error = serializationError ?: LocusActivationError(25, @"Failed to serialize region_info.plist.");
-                }
-                return NO;
-            }
-
-            if (!LocusRewriteExistingActivationFile(readPath, updated, 30, error)) {
-                return NO;
-            }
-
-            NSData *verificationData = [NSData dataWithContentsOfFile:readPath];
-            NSDictionary *verification = verificationData
-                ? LocusParsePlistData(verificationData, 0, NULL, NULL)
-                : nil;
-            BOOL valid = verification.count > 0 &&
-                [LocusFirstValue(verification, LocusCountryKeys()) isEqual:@"JP"] &&
-                [LocusFirstValue(verification, LocusRegionKeys()) isEqual:@"J/A"] &&
-                [LocusFirstValue(verification, LocusBehaviorKeys()) isEqual:@"25"];
-            if (!valid) {
-                if (error) {
-                    *error = LocusActivationError(34, @"Japan region_info.plist verification failed.");
-                }
-                return NO;
-            }
-
-            if (error) {
-                *error = nil;
-            }
-            return YES;
-        } @finally {
-            [lease invalidate];
-        }
-    }
-}
-
-- (BOOL)restoreRegionData:(NSData *)data error:(NSError **)error
-{
-    @synchronized (self) {
-        if (![data isKindOfClass:NSData.class] || data.length == 0) {
-            if (error) {
-                *error = LocusActivationError(41, @"The MobileActivation backup is empty.");
-            }
-            return NO;
-        }
-
-        NSString *readPath = nil;
-        WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, error, nil);
-        if (!lease) {
-            return NO;
-        }
-        @try {
-            return LocusRewriteExistingActivationFile(readPath, data, 42, error);
-        } @finally {
-            [lease invalidate];
-        }
+            LocusFileOutcome outcome = LocusFileUnchanged;
+            int rc = LocusReplaceFile(path.fileSystemRepresentation, expected.bytes, expected.length,
+                                      replacement.bytes, replacement.length, &outcome);
+            if (rc != 0 && error) *error = LocusActivationError(50,
+                [NSString stringWithFormat:@"MobileActivation compare-and-replace failed (errno=%d, outcome=%d: 0=unchanged, 2=rollback verified, 3=recovery required).", errno, outcome]);
+            if (rc == 0 && error) *error = nil;
+            return rc == 0;
+        } @finally { [lease invalidate]; }
     }
 }
 
@@ -1058,6 +863,13 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
         result[@"backingRegionInfo"] = NSNull.null;
         result[@"backingSoftwareBehaviors"] = NSNull.null;
         result[@"mutationSchemaSupported"] = @NO;
+        result[@"backingSchemaValid"] = @NO;
+        result[@"backingWriteAccessAvailable"] = @NO;
+        result[@"backingWriteAccessError"] = @"Backing file has not been directly read and identified.";
+        result[@"binarySupported"] = @NO;
+        result[@"binaryUUID"] = NSNull.null;
+        result[@"storagePathProvenance"] = @"Inherited relative-path hypothesis; requires current framework/daemon review. No file is created.";
+        result[@"metadataDenialMeaning"] = @"Denied metadata reads do not establish region_info.plist absence or unreadability. File access requires an independently identified container.";
         result[@"mutationSchemaErrorDetails"] = NSNull.null;
         result[@"mutationSchemaError"] = leaseError
             ? LocusSafeDiagnosticText(leaseError.localizedDescription) : @"Backing data unavailable.";
@@ -1075,8 +887,9 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
                     : nil;
                 if (backing) {
                     NSError *schemaError = nil;
-                    result[@"mutationSchemaSupported"] = @(LocusValidateRegionSchema(backing, &schemaError));
-                    result[@"mutationSchemaError"] = schemaError.localizedDescription ?: NSNull.null;
+                    result[@"backingSchemaValid"] = @(LocusValidateRegionSchema(backing, &schemaError));
+                    result[@"mutationSchemaError"] = schemaError.localizedDescription ?:
+                        @"Readable schema candidate; current MobileActivation storage/consumer binary semantics remain unreviewed.";
                     result[@"mutationSchemaErrorDetails"] = schemaError
                         ? LocusErrorDetails(schemaError, @"schema-validation") : (id)NSNull.null;
                     result[@"backingReadSucceeded"] = @YES;
@@ -1089,6 +902,21 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
                         LocusFirstValue(backing, LocusRegionKeys()) ?: NSNull.null;
                     result[@"backingSoftwareBehaviors"] =
                         LocusFirstValue(backing, LocusBehaviorKeys()) ?: NSNull.null;
+                    // A readable schema is not proof of write access. Probe the
+                    // existing regular inode without creating or changing it.
+                    int fd = open(readPath.fileSystemRepresentation, O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+                    int writeError = fd < 0 ? errno : 0;
+                    BOOL writable = NO;
+                    if (fd >= 0) {
+                        struct stat state;
+                        if (fstat(fd, &state) != 0) writeError = errno;
+                        else if (!S_ISREG(state.st_mode) || state.st_nlink != 1) writeError = EINVAL;
+                        else writable = YES;
+                        close(fd);
+                    }
+                    result[@"backingWriteAccessAvailable"] = @(writable);
+                    result[@"backingWriteAccessError"] = writable ? (id)NSNull.null :
+                        [NSString stringWithFormat:@"Existing region file is not writable as a regular single-link inode (errno=%d).", writeError];
                 } else {
                     NSString *stage = bytesRead ? @"plist-parse" : @"file-read";
                     readError = readError ?: LocusActivationError(bytesRead ? 23 : 20,
@@ -1118,6 +946,14 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
                 @"Could not load MobileActivation: %s", dlerror() ?: "unknown error"];
             return [result copy];
         }
+
+        result[@"binaryUUID"] = LocusLoadedImageIdentity(LocusActivationFramework)[@"binaryUUID"] ?: NSNull.null;
+        result[@"binarySupported"] = @(LocusActivationBinaryReviewed());
+        result[@"mutationSchemaSupported"] = @([result[@"backingSchemaValid"] boolValue] &&
+            [result[@"binarySupported"] boolValue] && [result[@"backingWriteAccessAvailable"] boolValue]);
+        if ([result[@"binarySupported"] boolValue] && [result[@"backingSchemaValid"] boolValue] &&
+            ![result[@"backingWriteAccessAvailable"] boolValue]) result[@"mutationSchemaError"] = result[@"backingWriteAccessError"];
+        if ([result[@"mutationSchemaSupported"] boolValue]) result[@"mutationSchemaError"] = NSNull.null;
 
         LocusCopyDeviceRegionInfo copyRegion =
             (LocusCopyDeviceRegionInfo)dlsym(handle, "MAECopyDeviceRegionInfoWithError");

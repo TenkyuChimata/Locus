@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(Darwin)
 import Darwin
+#else
+import Glibc
+#endif
 
 struct RegionTransactionBackup {
     let directory: URL
@@ -14,7 +18,7 @@ struct RegionTransactionBackup {
 
     private func saveExact(_ data: Data, name: String) throws {
         let url = directory.appendingPathComponent(name)
-        try data.write(to: url, options: .atomic)
+        try data.write(to: url, options: .withoutOverwriting)
         try syncBackup(url)
         guard try Data(contentsOf: url) == data else {
             throw CocoaError(.fileWriteUnknown)

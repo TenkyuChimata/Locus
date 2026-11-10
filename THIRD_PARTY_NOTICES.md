@@ -52,6 +52,25 @@ requirements in its existing bridge architecture. In particular, it does not
 copy GestaltEdit's Mach-O entitlement parser, generic editor, presets, automation,
 models or backup UI. The MIT-era inherited attribution above remains intact.
 
+## GestaltX — scoped descriptor and field reference
+
+- Source: [midori01/GestaltX](https://github.com/midori01/GestaltX), reviewed
+  revision [`2ec7e15a9ccf1bcdb1da652561eb9eca476b550d`](https://github.com/midori01/GestaltX/tree/2ec7e15a9ccf1bcdb1da652561eb9eca476b550d)
+- Copyright (C) 2026 huamidev
+- License: **GPL-3.0-only**; the complete license accompanies Locus in `LICENSE`.
+- `MobileGestaltCacheLayout.swift` and `GXMobileGestaltImage.m` informed the
+  loaded-image section selection, 64-byte descriptor hypothesis, key-pointer
+  comparison and index/type offsets in Locus's `RegionCacheMapping.swift` and
+  `MobileGestaltImage.m`. These are modified, scoped implementations, with the
+  upstream attribution retained. Locus adds checked Mach VM reads, segment and
+  section bounds, separate evidence levels, per-question conflicts and an empty
+  independent binary-review registry. It imports no upstream historical profile.
+- `DeviceCacheOptions.swift`, `GestaltDocument.swift`, `GestaltManager.swift`,
+  `Capabilities.swift` and `tests/DocumentTests.swift` were reviewed for field
+  separation, capability-key handling, precise restore and regression cases.
+  Locus retains its own region UI, file coordinator, journals and backup format;
+  no general editor, preset catalog, model spoofing or application shell is copied.
+
 ## SpringBoard refresh research
 
 `Locus/Support/RespringOverlay.swift` is unchanged by this migration. It retains

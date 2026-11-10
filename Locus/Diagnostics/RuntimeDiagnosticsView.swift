@@ -86,6 +86,13 @@ struct RuntimeDiagnosticsView: View {
                 valueRow(title, (activationDiscovery["identityQuery"] as? [String: Any])?[key])
             }
             valueRow("Schema Supported", service.activation["mutationSchemaSupported"])
+            valueRow("Backing Schema Shape Valid", service.activation["backingSchemaValid"])
+            valueRow("Existing File Write Access", service.activation["backingWriteAccessAvailable"])
+            valueRow("Write Access Error", service.activation["backingWriteAccessError"])
+            valueRow("Framework LC_UUID", service.activation["binaryUUID"])
+            valueRow("Binary Semantics Reviewed", service.activation["binarySupported"])
+            valueRow("Storage Path Evidence", service.activation["storagePathProvenance"])
+            valueRow("Metadata Denial Meaning", service.activation["metadataDenialMeaning"])
             valueRow("Schema Error", service.activation["mutationSchemaError"])
             valueRow("Schema Error Details", service.activation["mutationSchemaErrorDetails"])
             valueRow("CountryCode", service.activation["backingCountryCode"])
@@ -152,6 +159,9 @@ struct RuntimeDiagnosticsView: View {
 
     private var cacheLayoutSection: some View {
         Section {
+            valueRow("Loaded Binary LC_UUID", service.imageIdentity["binaryUUID"])
+            valueRow("Image Snapshot Error", service.imageIdentity["error"])
+            valueRow("Pointer Comparison", service.imageIdentity["pointerComparison"])
             valueRow("CacheUUID", service.cacheLayout["cacheUUID"])
             valueRow("CacheUUID Type", service.cacheLayout["cacheUUIDType"])
             valueRow("CacheUUID Valid", service.cacheLayout["cacheUUIDValid"])
@@ -168,6 +178,19 @@ struct RuntimeDiagnosticsView: View {
             valueRow("Structure", service.cacheLayout["structuralStatus"])
             valueRow("Write Layout Supported", service.cacheLayout["layoutSupported"])
             valueRow("Write Validation", service.cacheLayout["mutationStatus"])
+            ForEach(service.cacheMapping, id: \.question) { item in
+                DisclosureGroup(item.question.rawValue + " · " + item.status.rawValue) {
+                    Text(item.reason).font(.caption.monospaced()).textSelection(.enabled)
+                    if let descriptor = item.descriptor {
+                        valueRow("Descriptor Section", descriptor.section)
+                        valueRow("Descriptor Offset", descriptor.offset)
+                        valueRow("Candidate Index", descriptor.slot)
+                        valueRow("Candidate Type", descriptor.type)
+                    }
+                    valueRow("Candidate Cache Value", item.cacheValue)
+                    valueRow("Validity Byte", item.valid)
+                }
+            }
         } header: {
             Text("MobileGestalt Cache Layout")
         } footer: {

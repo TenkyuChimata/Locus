@@ -23,6 +23,8 @@ struct CoreTextGB18030View: View {
                     valueRow("Cached Byte Address", probe["cachedBoolRuntimeAddress"])
                     valueRow("Cached Predicate Byte", probe["cachedByte"])
                     valueRow("Once Complete", probe["onceComplete"])
+                    valueRow("Experiment Scope", probe["scope"])
+                    valueRow("Verification", probe["verificationStatus"])
 
                     if let validationError = probe["validationError"],
                        !(validationError is NSNull) {

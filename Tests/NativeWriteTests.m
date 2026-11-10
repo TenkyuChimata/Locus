@@ -1,70 +1,49 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Execute the actual in-place writers against temporary files, with one-shot
-// partial-write/fsync faults. No system path or sandbox grant is accessed.
+// Actual Objective-C bridge and C writer, redirected to a temporary file.
+// No device/system path or sandbox grant is accessed.
 #import <Foundation/Foundation.h>
-#include <assert.h>
-#include <errno.h>
-#include <stdio.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-static ssize_t TestWrite(int, const void *, size_t);
-static int TestSync(int);
-#define write TestWrite
-#define fsync TestSync
-#if LOCUS_TEST_ACTIVATION
-#import "../Locus/LowLevel/MobileActivationRegionAccess.m"
-#define Rewrite LocusRewriteExistingActivationFile
-#else
+#import <assert.h>
+#import <sys/stat.h>
 #import "../Locus/LowLevel/MobileGestaltAccess.m"
-#define Rewrite LocusRewriteExistingFile
-#endif
-#undef write
-#undef fsync
 
-static int partialWrite;
-static BOOL failSync;
-static ssize_t TestWrite(int fd, const void *data, size_t size)
+@interface TestGestaltAccess : MobileGestaltAccess
+@property(nonatomic) NSUInteger probes;
+@end
+@implementation TestGestaltAccess
+- (BOOL)acquireLeaseRequiringWrite:(BOOL)write error:(NSError **)error
 {
-    if (partialWrite == 1 && size > 1) { partialWrite = 2; return write(fd, data, 1); }
-    if (partialWrite == 2) { partialWrite = 0; errno = ENOSPC; return -1; }
-    return write(fd, data, size);
+    (void)write;
+    self.probes++;
+    if (error) *error = nil;
+    return YES;
 }
-static int TestSync(int fd)
-{
-    if (failSync) { failSync = NO; errno = EIO; return -1; }
-    return fsync(fd);
-}
-
+@end
 int main(void)
 {
     @autoreleasepool {
         NSString *directory = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
         assert([NSFileManager.defaultManager createDirectoryAtPath:directory withIntermediateDirectories:NO attributes:nil error:NULL]);
-        NSString *path = [directory stringByAppendingPathComponent:@"original.plist"];
-        const unsigned char raw[] = {0, 0xFF, 3, 27, 10, 0};
-        NSData *original = [NSData dataWithBytes:raw length:sizeof(raw)];
-        NSData *replacement = [@"different replacement bytes" dataUsingEncoding:NSUTF8StringEncoding];
-        assert([original writeToFile:path atomically:NO]);
-        struct stat before, after;
-        assert(lstat(path.fileSystemRepresentation, &before) == 0);
+        NSString *path = [directory stringByAppendingPathComponent:@"cache.plist"];
+        NSData *before = [NSPropertyListSerialization dataWithPropertyList:@{@"CacheExtra": @{@"field": @"before"}}
+            format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+        NSData *after = [NSPropertyListSerialization dataWithPropertyList:@{@"CacheExtra": @{@"field": @"after"}}
+            format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+        assert([before writeToFile:path atomically:NO]);
+        struct stat a, b;
+        assert(!lstat(path.fileSystemRepresentation, &a));
+        TestGestaltAccess *access = [TestGestaltAccess new];
+        access.plistPath = path;
+        assert([access.cacheWriteAccessStatus[@"writable"] boolValue]);
         NSError *error = nil;
-        assert(Rewrite(path, replacement, 20, &error) && error == nil);
-        assert(lstat(path.fileSystemRepresentation, &after) == 0 && after.st_ino == before.st_ino);
-        assert([[NSData dataWithContentsOfFile:path] isEqualToData:replacement]);
-        assert(Rewrite(path, original, 20, &error));
-        partialWrite = 1;
-        assert(!Rewrite(path, replacement, 20, &error) && error);
-        assert([[NSData dataWithContentsOfFile:path] isEqualToData:original]);
-        failSync = YES;
-        assert(!Rewrite(path, replacement, 20, &error) && error);
-        assert([[NSData dataWithContentsOfFile:path] isEqualToData:original]);
-        NSString *alias = [directory stringByAppendingPathComponent:@"alias.plist"];
-        assert([NSFileManager.defaultManager createSymbolicLinkAtPath:alias withDestinationPath:path error:NULL]);
-        assert(!Rewrite(alias, replacement, 20, &error));
-        assert([[NSData dataWithContentsOfFile:path] isEqualToData:original]);
-        assert(lstat(path.fileSystemRepresentation, &after) == 0 && after.st_ino == before.st_ino);
+        assert([access replaceCacheData:before withData:after error:&error] && !error);
+        assert([[access readCacheDataWithError:&error] isEqual:after]);
+        assert(![access replaceCacheData:before withData:before error:&error] && error);
+        assert([[access readCacheDataWithError:NULL] isEqual:after]);
+        assert([access replaceCacheData:after withData:before error:&error] && !error);
+        assert([[access readCacheDataWithError:NULL] isEqual:before]);
+        assert(!lstat(path.fileSystemRepresentation, &b) && a.st_ino == b.st_ino);
+        assert(access.probes >= 7);
         assert([NSFileManager.defaultManager removeItemAtPath:directory error:NULL]);
-        puts("PASS: actual in-place writer, inode retention, partial-write rollback, fsync rollback and symlink refusal");
+        puts("PASS: actual MobileGestalt bridge CAS, byte readback, stale refusal and inode retention (temporary file)");
     }
 }

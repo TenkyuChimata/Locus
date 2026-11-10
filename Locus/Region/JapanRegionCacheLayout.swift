@@ -31,7 +31,8 @@ struct JapanRegionCacheLayout {
     // The inherited source contains offsets but no CacheUUID or binary evidence.
     // Do not manufacture a fingerprint. Until a descriptor audit supplies one,
     // all persisted layouts are unknown and mutation fails closed, on every OS.
-    static let reviewedSchemas: [String: JapanRegionCacheLayout] = [:]
+    // The reviewed registry now lives in RegionCacheMapping and binds the
+    // binary UUID, build, CacheUUID, length and per-question descriptor evidence.
 
     /// Structural observations only. A plausible 8N + N layout never registers
     /// a schema or authorizes mutation; even its slot count remains a candidate.
@@ -92,20 +93,21 @@ struct JapanRegionCacheLayout {
     }
 
     static func resolve(plist: [String: Any], build: String) throws -> Self {
-        guard let uuid = plist["CacheUUID"] as? String,
-              let parsedUUID = UUID(uuidString: uuid),
-              let layout = reviewedSchemas[parsedUUID.uuidString] else {
-            throw JapanRegionError.unverifiedCacheSemantics
+        let assessments = RegionCacheMapping.assess(plist: plist, build: build,
+            image: RegionCacheMapping.loadedImage(), writeAccess: false)
+        if let data = plist["CacheData"] as? Data,
+           assessments.count == RegionCacheQuestion.allCases.count,
+           assessments.allSatisfy({ $0.status == .binaryVerified || $0.status == .writable }) {
+            let layout = Self(size: data.count, slotCount: data.count / 9, fields: try assessments.map { item in
+                guard let descriptor = item.descriptor else { throw JapanRegionError.unverifiedCacheSemantics }
+                return .init(question: item.question.rawValue, slot: descriptor.slot, value: item.question.target)
+            })
+            try layout.validate(data)
+            return layout
         }
-        guard let cacheVersion = plist["CacheVersion"] as? String,
-              !build.isEmpty, cacheVersion == build else {
-            throw JapanRegionError.staleCache
-        }
-        guard let data = plist["CacheData"] as? Data else {
-            throw JapanRegionError.missingCacheData
-        }
-        try layout.validate(data)
-        return layout
+        guard !build.isEmpty, plist["CacheVersion"] as? String == build else { throw JapanRegionError.staleCache }
+        guard plist["CacheData"] is Data else { throw JapanRegionError.missingCacheData }
+        throw JapanRegionError.unverifiedCacheSemantics
     }
 
     func validate(_ data: Data) throws {
