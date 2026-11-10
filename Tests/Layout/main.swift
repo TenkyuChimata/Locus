@@ -66,7 +66,7 @@ assert(wrongTypes["cacheVersionMatchesBuild"] as? Bool == false)
 
 let profile = JapanRegionProfile.verified(for: "iPhone17,3")!
 assert(profile.regulatoryModel == "A3286")
-assert(JapanRegionProfile.verified(for: "iPhone999,1") == nil)
+assert(JapanRegionProfile.verified(for: "iPhone999,1")?.productType == nil)
 assert(JapanRegionProfile.verified(for: "iPad17,4")?.regulatoryModel == "A3361")
 let extra: [String: Any] = [
     JapanRegionMutation.regionCodeKey: "CH",

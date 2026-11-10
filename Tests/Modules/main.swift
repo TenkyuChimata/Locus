@@ -55,7 +55,9 @@ for malformed in [0, true, Data([1])] as [Any] {
     rejects { _ = try RegionModuleMutation.plan(module: .regionCode, raw: encode(fixture), productType: profile) }
 }
 expect(JapanRegionProfile.verified(for: profile)?.regulatoryModel == "A3519")
-expect(JapanRegionProfile.verified(for: "unknown") == nil)
+// Inspect an Optional<String> so a nil check does not require the profile's
+// actor-isolated Equatable conformance in this top-level test context.
+expect(JapanRegionProfile.verified(for: "unknown")?.productType == nil)
 rejects { _ = try RegionModuleMutation.plan(module: .regulatoryModel, raw: baselineBytes, productType: "unknown") }
 var identityOnly = baseline
 identityOnly.removeValue(forKey: "CacheData"); identityOnly.removeValue(forKey: "CacheUUID"); identityOnly.removeValue(forKey: "CacheVersion")

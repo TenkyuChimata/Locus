@@ -20,8 +20,10 @@ set -- Locus/Region/JapanRegionProfile.swift Locus/Region/JapanRegionCacheLayout
   "$@" Locus/Region/RegionIdentityService.swift Tests/Transaction/Stubs.swift \
   Tests/Transaction/main.swift -o "$temporary/service-tests"
 "$temporary/service-tests"
+"$compiler" -swift-version 5 -default-isolation MainActor -warnings-as-errors -module-cache-path "$temporary/cache" \
+  "$@" Tests/DeviceSnapshots/main.swift -o "$temporary/snapshot-tests"
 if [ -f iPhone17_CHA.plist ] && [ -f iPhoneSE3_JA.plist ]; then
-  "$compiler" -swift-version 5 -default-isolation MainActor -warnings-as-errors -module-cache-path "$temporary/cache" \
-    "$@" Tests/DeviceSnapshots/main.swift -o "$temporary/snapshot-tests"
   "$temporary/snapshot-tests" iPhone17_CHA.plist iPhoneSE3_JA.plist
+else
+  echo 'SKIP: real device snapshot checks; both local plist files are required (snapshot test compilation passed).'
 fi
