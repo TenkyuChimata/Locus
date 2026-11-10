@@ -11,8 +11,10 @@ import Foundation
     static var activation = initialActivation
     static var activationReads = 0
     static var layoutKnown = true
-    static var initialGestalt: Data { encode(["CacheExtra": ["code": "CH", "info": "CH/A", "model": "old"]]) }
-    static var initialActivation: Data { encode(["CountryCode": "CN", "RegionInfo": "CH/A", "SoftwareBehaviors": "7"]) }
+    // Serialize each baseline once: dictionary order is not a binary-plist
+    // byte-stability contract. Backups and rollback must compare the same bytes.
+    static let initialGestalt = encode(["CacheExtra": ["code": "CH", "info": "CH/A", "model": "old"]])
+    static let initialActivation = encode(["CountryCode": "CN", "RegionInfo": "CH/A", "SoftwareBehaviors": "7"])
     static func encode(_ value: [String: Any]) -> Data {
         try! PropertyListSerialization.data(fromPropertyList: value, format: .binary, options: 0)
     }

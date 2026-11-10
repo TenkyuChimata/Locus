@@ -2,6 +2,18 @@
 import Foundation
 
 MainActor.assumeIsolated {
+    let gestaltBaseline = Fixture.initialGestalt
+    let activationBaseline = Fixture.initialActivation
+    // Repeated reads and scenario resets must reuse the exact source bytes,
+    // even when a fresh dictionary would serialize in a different order.
+    for _ in 0..<64 {
+        assert(Fixture.initialGestalt == gestaltBaseline)
+        assert(Fixture.initialActivation == activationBaseline)
+        Fixture.reset(.none)
+        assert(Fixture.gestalt == gestaltBaseline)
+        assert(Fixture.activation == activationBaseline)
+    }
+
     for fault in [Fixture.Fault.none, .backup, .activationPartial, .gestaltPartial,
                   .gestaltVerification, .finalActivationVerification, .rollback] {
         Fixture.reset(fault)
