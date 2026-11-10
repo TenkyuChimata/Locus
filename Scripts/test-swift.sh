@@ -14,6 +14,10 @@ set -- Locus/Region/JapanRegionProfile.swift Locus/Region/JapanRegionCacheLayout
   "$@" Tests/Modules/main.swift -o "$temporary/module-tests"
 "$temporary/module-tests"
 "$compiler" -swift-version 5 -default-isolation MainActor -warnings-as-errors -module-cache-path "$temporary/cache" \
+  Locus/Region/RegionBackupDigest.swift Locus/Diagnostics/MobileGestaltEvidenceCollector.swift \
+  Tests/RuntimeEvidence/main.swift -o "$temporary/runtime-evidence-tests"
+"$temporary/runtime-evidence-tests"
+"$compiler" -swift-version 5 -default-isolation MainActor -warnings-as-errors -module-cache-path "$temporary/cache" \
   "$@" Locus/Region/TransactionBackupStore.swift Tests/Layout/main.swift -o "$temporary/layout-tests"
 "$temporary/layout-tests"
 "$compiler" -swift-version 5 -default-isolation MainActor -warnings-as-errors -module-cache-path "$temporary/cache" \

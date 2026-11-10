@@ -4,6 +4,12 @@ set -eu
 cd "$(dirname "$0")/.."
 temporary=$(mktemp -d /tmp/LocusNativeTests.XXXXXX)
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+clang -std=c17 -Wall -Wextra -Werror -I Locus/LowLevel \
+  -c Locus/LowLevel/ReadOnlyEvidenceFile.c -o "$temporary/evidence-file.o"
+clang -fobjc-arc -fmodules -Wall -Wextra -Werror -Wno-nullability-completeness \
+  -I Locus/LowLevel -framework Foundation Tests/MobileGestaltEvidenceTests.m \
+  "$temporary/evidence-file.o" -o "$temporary/evidence-native-tests"
+"$temporary/evidence-native-tests"
 clang -std=c17 -Wall -Wextra -Werror -c Locus/LowLevel/WorseQueryWorkspace.c \
   -o "$temporary/workspace.o"
 clang -std=c17 -Wall -Wextra -Werror -c Locus/LowLevel/InPlaceFileTransaction.c \

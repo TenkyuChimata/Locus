@@ -1,14 +1,19 @@
 import SwiftUI
+import UIKit
 
 struct RuntimeDiagnosticsView: View {
     @EnvironmentObject private var service: RuntimeDiagnosticsService
+    @State private var evidenceExport: EvidenceExport?
+    @State private var exportedEvidenceURL: URL?
+    @State private var evidenceError: String?
+    @State private var isCollectingEvidence = false
 
     var body: some View {
         NavigationStack {
             List {
                 Section {
                     valueRow("OS Build", MobileGestaltAccess.currentOSBuild())
-                    Label("Read-only diagnostics", systemImage: "eye.fill")
+                    Label("Refresh queries runtime APIs; evidence export is separate", systemImage: "eye.fill")
                         .foregroundStyle(.secondary)
                 }
 
@@ -41,11 +46,19 @@ struct RuntimeDiagnosticsView: View {
                             Image(systemName: "arrow.clockwise")
                         }
                     }
-                    .disabled(service.isLoading)
+                    .disabled(service.isLoading || isCollectingEvidence)
                     .accessibilityLabel("Refresh Runtime Diagnostics")
                 }
             }
-            .task { service.refresh() }
+            .sheet(item: $evidenceExport, onDismiss: {
+                if let url = exportedEvidenceURL {
+                    do { try FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+                    catch { evidenceError = "Temporary evidence cleanup failed: \(error.localizedDescription)" }
+                    exportedEvidenceURL = nil
+                }
+            }) { item in
+                EvidenceShareSheet(url: item.url)
+            }
         }
     }
 
@@ -159,6 +172,31 @@ struct RuntimeDiagnosticsView: View {
 
     private var cacheLayoutSection: some View {
         Section {
+            Button {
+                isCollectingEvidence = true
+                evidenceError = nil
+                Task { @MainActor in
+                    await Task.yield()
+                    defer { isCollectingEvidence = false }
+                    do {
+                        let report = MobileGestaltEvidenceCollector.collect()
+                        let url = try MobileGestaltEvidenceCollector.export(report)
+                        exportedEvidenceURL = url
+                        evidenceExport = EvidenceExport(url: url)
+                    } catch {
+                        evidenceError = "Evidence export failed: \(error.localizedDescription)"
+                    }
+                }
+            } label: {
+                Label(isCollectingEvidence ? "Collecting Read-only Evidence…" : "Export Read-only Runtime Evidence",
+                      systemImage: "square.and.arrow.up")
+            }
+            .disabled(isCollectingEvidence || service.isLoading)
+            Text("System data is only read. A redacted JSON is created in the app temporary directory for sharing. Safe Mutation Authorization stays NO-GO.")
+                .font(.caption).foregroundStyle(.secondary)
+            if let evidenceError {
+                Text(evidenceError).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+            }
             valueRow("Loaded Binary LC_UUID", service.imageIdentity["binaryUUID"])
             valueRow("Image Snapshot Error", service.imageIdentity["error"])
             valueRow("Pointer Comparison", service.imageIdentity["pointerComparison"])
@@ -300,4 +338,17 @@ struct RuntimeDiagnosticsView: View {
                 .textSelection(.enabled)
         }
     }
+}
+
+private struct EvidenceExport: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+private struct EvidenceShareSheet: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

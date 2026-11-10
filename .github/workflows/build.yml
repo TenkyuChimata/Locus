@@ -2,6 +2,7 @@ name: Build Locus IPA
 
 on:
   workflow_dispatch:
+  pull_request:
   push:
     branches:
       - main
@@ -27,7 +28,7 @@ jobs:
       - name: Portable regressions on macOS
         run: sh Scripts/test-portable.sh
 
-      - name: Host regressions (simulated APIs, temporary files)
+      - name: Host regressions (native read-only evidence, Swift assembly and temporary files)
         run: sh Scripts/test-macos.sh
 
   ios-sdk-checks:
