@@ -1,0 +1,244 @@
+{
+  "scope": "Offline candidate only; never a ReviewedCacheSchema registration",
+  "origin": {
+    "device": "iPhone18,3",
+    "system": "27.2",
+    "build": "24B119",
+    "provenance": "User-provided firmware research; extracted Mach-O alone does not authenticate device/build"
+  },
+  "lc_uuid": "9F28583A-0C54-304C-BE18-C12F593AC826",
+  "sha256": "d5b2c93693db10cfb47574b4a9555c4c5affc5309b5f15101066dfd02308c9f7",
+  "size": 1059472,
+  "cache_uuid": "48CB1FAC-755B-435F-9A01-A20E5D810EA9",
+  "shared_cache_base": "0x180000000",
+  "pointer_format": "Shared-cache v5 compatible; original slide page chains absent from extraction",
+  "questions": [
+    {
+      "name": "green-tea",
+      "hash": "iyfxmLogGVIaH7aEgqwcIA",
+      "section": "__AUTH_CONST.__const",
+      "section_offset": "0xdcb0",
+      "descriptor_va": "0x1e55330d8",
+      "ordinal": 850,
+      "slot": 383,
+      "type": 11,
+      "flags": 25,
+      "value_offset": "0xbf8",
+      "validity_offset": "0x17ff",
+      "getter_va": "0x1afeb1cf0",
+      "handler_va": "0x1afeba4cc",
+      "name_va": "0x1aff2ac56",
+      "hash_va": "0x1aff3167d"
+    },
+    {
+      "name": "not-green-tea",
+      "hash": "4snMZS8LJkSctKypt2m+xA",
+      "section": "__AUTH_CONST.__const",
+      "section_offset": "0x71f0",
+      "descriptor_va": "0x1e552c618",
+      "ordinal": 423,
+      "slot": 506,
+      "type": 11,
+      "flags": 25,
+      "value_offset": "0xfd0",
+      "validity_offset": "0x187a",
+      "getter_va": "0x1afed3554",
+      "handler_va": "0x1afee3894",
+      "name_va": "0x1aff2b9a4",
+      "hash_va": "0x1aff2fcb2"
+    },
+    {
+      "name": "wapi",
+      "hash": "hiHut/WR+B9Lx/vd0WyeNg",
+      "section": "__AUTH_CONST.__const",
+      "section_offset": "0x12eb0",
+      "descriptor_va": "0x1e55382d8",
+      "ordinal": 1178,
+      "slot": 694,
+      "type": 11,
+      "flags": 28,
+      "value_offset": "0x15b0",
+      "validity_offset": "0x1936",
+      "getter_va": "0x1afeb85f4",
+      "handler_va": "0x1afeed528",
+      "name_va": "0x1aff2cf5e",
+      "hash_va": "0x1aff327e3"
+    }
+  ],
+  "code_ranges": [
+    {
+      "name": "question-parser",
+      "start": "0x1afeaf594",
+      "end": "0x1afeaf848",
+      "sha256": "4adcf0a20c3274efaff87b4a9f0ec755cd4a78996b315620bc11b17c5e008a9a"
+    },
+    {
+      "name": "core-query",
+      "start": "0x1afeaf848",
+      "end": "0x1afeafbf4",
+      "sha256": "8a4d1b3ba983e90f3b74256724cad137c653c6d8b0079ca011fe462cc313f90e"
+    },
+    {
+      "name": "perfect-hash",
+      "start": "0x1afeafc48",
+      "end": "0x1afeafcdc",
+      "sha256": "f23f44dd5016acb4962f75f2882245bb7cfe4774335ea0da2e164bd7f93014be"
+    },
+    {
+      "name": "cache-read",
+      "start": "0x1afeafcdc",
+      "end": "0x1afeafe70",
+      "sha256": "f50759de2ffc3b9274de9f8eb0fad7996a101cb103066efb81a8d00691bf2caf"
+    },
+    {
+      "name": "disk-cache-load",
+      "start": "0x1afeb0050",
+      "end": "0x1afeb0768",
+      "sha256": "86ba0dcb7ebe2f2a2ba27504e02009079556e113cbb1a3c0883f4ce92463b3ab"
+    },
+    {
+      "name": "cache-length",
+      "start": "0x1afeb09cc",
+      "end": "0x1afeb0a24",
+      "sha256": "dd51d9e81132f08b4d78a904be5685d68003eb81e13f39e019092168d692c174"
+    },
+    {
+      "name": "post-load-invalidation",
+      "start": "0x1afeb0a24",
+      "end": "0x1afeb0ae4",
+      "sha256": "079f3050ddad21593d87f462238ecab62597929f580c4f0d0e8cdd38f5eedfd1"
+    },
+    {
+      "name": "table-getter",
+      "start": "0x1afeb0ae4",
+      "end": "0x1afeb0af8",
+      "sha256": "4a4664854e3661b357cdc9fc456734b5634712e0b00bb6e362ff90ace89e6052"
+    },
+    {
+      "name": "cache-key-parser",
+      "start": "0x1afeb0bd4",
+      "end": "0x1afeb0bdc",
+      "sha256": "4f8db57a10bafc11bc9ca94bbd2025ad3fd1457cc168e5291ebfd24586a49cd9"
+    },
+    {
+      "name": "extra-import",
+      "start": "0x1afeb0bdc",
+      "end": "0x1afeb0dd0",
+      "sha256": "ebd5066528757a9605f6605272b0b71a26a408b01813f96dca32fdc78c5ec149"
+    },
+    {
+      "name": "cache-set",
+      "start": "0x1afeb1b10",
+      "end": "0x1afeb1c64",
+      "sha256": "b6af0b1df48e12cc2573a5b6953ae27c42de95cb2a082953f111956c798f4b4c"
+    },
+    {
+      "name": "cache-clear",
+      "start": "0x1afef46f0",
+      "end": "0x1afef47e0",
+      "sha256": "3646a2b339fd636ecdc0f6319b169c078047d42c949ba0bb6804dc73b758582e"
+    },
+    {
+      "name": "cache-write",
+      "start": "0x1afef47e0",
+      "end": "0x1afef4fbc",
+      "sha256": "a0602b627ce56bca5e57b750d1e9a34ddbc5e008c86ed0582fc4a17f32885e9f"
+    },
+    {
+      "name": "getter-green-tea",
+      "start": "0x1afeb1cf0",
+      "end": "0x1afeb1cfc",
+      "sha256": "d527bc24958440116b13da8ea5c99e9f98e770fbfec37215f3011e3fe473d9dd"
+    },
+    {
+      "name": "getter-not-green-tea",
+      "start": "0x1afed3554",
+      "end": "0x1afed3560",
+      "sha256": "d00e9adb600a8215a6b29724a545f3dcd3e5a7c582745a744209f7083b5baac9"
+    },
+    {
+      "name": "getter-wapi",
+      "start": "0x1afeb85f4",
+      "end": "0x1afeb8600",
+      "sha256": "3d56845a7c6dcd676a1d7987aab0b2f1184ef11ba798dac526616f33c69da4d6"
+    }
+  ],
+  "research_root": "/home/Furina/Locus-Firmware-Research",
+  "research_inputs": [
+    {
+      "path": "Locus_MobileGestalt_24B119_Offline_Binary_Audit.md",
+      "size": 8234,
+      "sha256": "c695e54b236ab7243690e2cb44d669dda9de13cb778a308b40725d6b139a340a"
+    },
+    {
+      "path": "verify_mobilegestalt_24B119.py",
+      "size": 5679,
+      "sha256": "584e76dc73c26beaf71364725ecd939fc06f823557bdb8051c476e766ff8a900"
+    },
+    {
+      "path": "mobilegestalt-strings.txt",
+      "size": 178010,
+      "sha256": "cec73ee03e5e3035264f442a0129e2e954b2e5ef51e8b1c46165948884310033"
+    },
+    {
+      "path": "mobilegestalt-symbols.txt",
+      "size": 220857,
+      "sha256": "35c19d2d7437c8b5d13a2a6c8c5c1161da56489f174479d7f31a7568c6621307"
+    },
+    {
+      "path": "mg-cache-disass.txt",
+      "size": 5805,
+      "sha256": "128e10305e90987491fc5e54399699b8039f9ca59f6728868255c17283638785"
+    },
+    {
+      "path": "mg-copyanswer-disass.txt",
+      "size": 6155,
+      "sha256": "4d3b298f280b6de4e88313d995eb4fe3062ee81d1957feee7e4a42623ac694e0"
+    },
+    {
+      "path": "mg-getbool-disass.txt",
+      "size": 5207,
+      "sha256": "47970ab3fcd13027bcd1a275aef7cd9f2d217f1bb174ff19ed9f9d2e5acb60fb"
+    },
+    {
+      "path": "iPhone17_CHA.plist",
+      "size": 11063,
+      "sha256": "22b9dee58cf08de821aabd66679c5155f6e85ded8a5fd03d356e3f7f4910a28c"
+    },
+    {
+      "path": "iPhoneSE3_JA.plist",
+      "size": 10803,
+      "sha256": "4d78f09732bf42c83bea9faef9657d5c6026a78ee31a016ec8e1125ab21ed34d"
+    },
+    {
+      "path": "mobilegestalt-audit/cache-read.txt",
+      "size": 4903,
+      "sha256": "dd383fea371604f77df5718a4284129af6cd16e2639d0ff416da7b1f0f30c580"
+    },
+    {
+      "path": "mobilegestalt-audit/cache-set.txt",
+      "size": 4910,
+      "sha256": "d9c392bb874ef2594c873260cdf55c9e07cce83323f530affc749dfee612aed2"
+    },
+    {
+      "path": "mobilegestalt-audit/core-query.txt",
+      "size": 11107,
+      "sha256": "45b89cd1153897036015b98b8f1a290a8263945ce11055907335b26f6371c28e"
+    },
+    {
+      "path": "mobilegestalt-audit/green-tea.txt",
+      "size": 3078,
+      "sha256": "a0e18714a4786bf4569ec11e5b7e0bc76a62f1ab9585e355c77cb6563653638f"
+    },
+    {
+      "path": "mobilegestalt-audit/not-green-tea.txt",
+      "size": 3362,
+      "sha256": "5b7156231b8935674cb60d1d8e6f00d181afcb0049287b9f0c2e18263a44c714"
+    },
+    {
+      "path": "mobilegestalt-audit/wapi.txt",
+      "size": 3487,
+      "sha256": "beb2f410038a4815fcf90ad011e4b72b8a0279daa9ca00a0c2babf7c9ad7de07"
+    }
+  ]
+}
