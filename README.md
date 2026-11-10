@@ -124,10 +124,11 @@ xcodebuild \
   build
 ```
 
-The GitHub Actions workflow runs host regressions and generic unsigned Debug
-and Release device builds,
-places `Locus.app` under `Payload`, creates `Locus-unsigned.ipa`, and uploads it
-as an artifact.
+The GitHub Actions workflow runs portable regressions, macOS native regressions,
+and generic unsigned Debug/Release device builds in independent jobs. A failed
+test does not prevent either build from reporting its result and keeps CI red.
+Only after all jobs succeed does the packaging job rebuild unsigned Release,
+place `Locus.app` under `Payload`, and upload `Locus-unsigned.ipa`.
 
 Do not treat a simulator or host build as validation of private device behavior.
 Persistent mutation and CoreText address validation require on-device testing.
@@ -174,5 +175,6 @@ APIs. None is an on-device compatibility or functional test.
 
 The Linux review environment ran the portable and Swift suites. macOS native
 regressions and unsigned iOS Debug/Release builds require Apple SDKs and are
-pending; no IPA or real-device validation is claimed. Details are recorded in
-[the review report](docs/region-modules-review.md).
+pending for this revision; no IPA or real-device validation is claimed. The CI
+failure analysis and validation limits are recorded in
+[the CI regression notes](docs/ci-native-regressions.md).

@@ -10,6 +10,7 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <stdlib.h>
+#import <stdio.h>
 #import "../Locus/LowLevel/WorseQueryBridge.h"
 
 static void *TestOpen(const char *, int);
@@ -37,7 +38,13 @@ static int TestFileClose(int);
 
 static NSString *normalPath, *configurationError;
 static NSArray<NSString *> *candidates;
-static BOOL failLease, failFramework, failSymbol, failAPI;
+typedef NS_ENUM(NSUInteger, LeaseFault) {
+    LeaseFaultNone, LeaseFaultAll, LeaseFaultMetadata, LeaseFaultRegion
+};
+static LeaseFault leaseFault;
+static BOOL failFramework, failSymbol, failAPI;
+static NSUInteger metadataLeaseAttempts, metadataLeaseDenials;
+static NSUInteger regionLeaseAttempts, regionLeaseDenials;
 static NSUInteger resolverCalls, acquired, invalidated;
 static BOOL queryEnabled, queryThrows, realStats, namedEnabled, denyPrivateMetadata;
 static BOOL queryIncomplete, queryErrorAvailable = YES, queryNullResult;
@@ -95,8 +102,8 @@ static uint64_t QueryErrorType(void *error) { assert(error == (void *)2); return
 static int QueryPOSIXError(void *error) { assert(error == (void *)2); return EPERM; }
 static void *TestOpen(const char *path, int flags)
 {
-    (void)path; (void)flags;
-    if (failFramework) return NULL;
+    (void)flags;
+    if (failFramework && !strcmp(path, LocusActivationFramework.UTF8String)) return NULL;
     librariesOpened++;
     return (void *)1;
 }
@@ -105,7 +112,7 @@ static void *TestSymbol(void *handle, const char *name)
     (void)handle;
     if (!strcmp(name, "container_system_group_path_for_identifier")) return (void *)Resolve;
     if (!strcmp(name, "container_get_error_description")) return (void *)DescribeStatus;
-    if (failSymbol) return NULL;
+    if (failSymbol && !strcmp(name, "MAECopyDeviceRegionInfoWithError")) return NULL;
     if (queryEnabled) {
         if (!strcmp(name, "container_query_create")) return (void *)QueryCreate;
         if (!strcmp(name, "container_query_set_class")) return (void *)QueryClass;
@@ -199,8 +206,16 @@ NSArray<NSString *> *WorseQueryListImmediateChildren(NSString *path, uint64_t li
 + (instancetype)leaseForPath:(NSString *)path error:(NSString **)error
 {
     BOOL named = [path.lastPathComponent isEqual:LocusActivationSystemGroup];
-    if (failLease || (named && !namedEnabled)) {
-        if (error) *error = @"simulated lease denial";
+    BOOL region = [path.lastPathComponent isEqual:@"region_info"] &&
+        [path.stringByDeletingLastPathComponent.lastPathComponent isEqual:@"Library"];
+    BOOL metadata = named || [[NSUUID alloc] initWithUUIDString:path.lastPathComponent] != nil;
+    assert(region != metadata); // Every lease in this fixture has one known purpose.
+    if (region) regionLeaseAttempts++; else metadataLeaseAttempts++;
+    BOOL injected = leaseFault == LeaseFaultAll ||
+        (leaseFault == LeaseFaultMetadata && metadata) || (leaseFault == LeaseFaultRegion && region);
+    if (injected || (named && !namedEnabled)) {
+        if (region) regionLeaseDenials++; else metadataLeaseDenials++;
+        if (error) *error = region ? @"simulated region lease denial" : @"simulated metadata lease denial";
         return nil;
     }
     WorseQueryLease *lease = [self new];
@@ -213,6 +228,7 @@ NSArray<NSString *> *WorseQueryListImmediateChildren(NSString *path, uint64_t li
 
 static NSDictionary *Probe(void)
 {
+    metadataLeaseAttempts = metadataLeaseDenials = regionLeaseAttempts = regionLeaseDenials = 0;
     NSUInteger before = resolverCalls;
     NSDictionary *result = [MobileActivationRegionAccess.shared regionDiagnostics];
     assert(resolverCalls == before + 1); // status and direct read use one attempt
@@ -220,6 +236,18 @@ static NSDictionary *Probe(void)
     assert(queriesCreated == queriesFreed && openDescriptors == 0);
     assert(librariesOpened == librariesClosed);
     return result;
+}
+
+static void ExpectStage(NSDictionary *result, NSString *key, NSString *expected)
+{
+    NSString *observed = [result[key] isKindOfClass:NSString.class] ? result[key] : @"<missing>";
+    NSString *metadataStage = result[@"discovery"][@"lastMetadataFailure"][@"stage"] ?: @"<none>";
+    fprintf(stderr, "ActivationDiagnostics %s: expected=%s observed=%s metadataFailure=%s "
+        "metadataAttempts=%lu metadataDenials=%lu regionAttempts=%lu regionDenials=%lu\n",
+        key.UTF8String, expected.UTF8String, observed.UTF8String, metadataStage.UTF8String,
+        (unsigned long)metadataLeaseAttempts, (unsigned long)metadataLeaseDenials,
+        (unsigned long)regionLeaseAttempts, (unsigned long)regionLeaseDenials);
+    assert([observed isEqual:expected]);
 }
 static void WritePlist(id value, NSString *path)
 {
@@ -309,25 +337,28 @@ int main(void)
         configurationError = @"simulated signing mismatch";
         failAPI = YES;
         result = Probe();
-        assert([result[@"backingStage"] isEqual:@"access-configuration"]);
+        ExpectStage(result, @"backingStage", @"access-configuration");
         assert([result[@"resolverStatus"] unsignedLongLongValue] == 55);
         assert([result[@"resolverStatusName"] isEqual:@"SIMULATED_STATUS_55"]);
-        assert([result[@"effectiveStage"] isEqual:@"api-error"]);
+        ExpectStage(result, @"effectiveStage", @"api-error");
         assert([result[@"effectiveErrorDomain"] isEqual:@"test.mobileactivation"]);
         assert([result[@"effectiveErrorCode"] intValue] == 42);
+        failAPI = NO; // Keep later backing-file cases independent of this API fault.
 
         configurationError = nil;
         result = Probe();
-        assert([result[@"backingStage"] isEqual:@"inode-enumeration"]);
+        ExpectStage(result, @"backingStage", @"inode-enumeration");
         candidates = @[];
         result = Probe();
-        assert([result[@"backingStage"] isEqual:@"systemgroup-discovery"]);
+        ExpectStage(result, @"backingStage", @"systemgroup-discovery");
 
         candidates = @[temporary];
-        failLease = YES;
+        leaseFault = LeaseFaultAll;
         result = Probe();
         assert([result[@"discovery"][@"metadataLeaseFailures"] intValue] == 2);
-        failLease = NO;
+        ExpectStage(result, @"backingStage", @"systemgroup-discovery");
+        assert(metadataLeaseAttempts == 2 && metadataLeaseDenials == 2 && regionLeaseAttempts == 0);
+        leaseFault = LeaseFaultNone;
         result = Probe();
         assert([result[@"discovery"][@"metadataReadFailures"] intValue] == 2);
         assert([result[@"discovery"][@"metadataFilesAttempted"] intValue] == 2);
@@ -364,25 +395,56 @@ int main(void)
         realStats = NO;
         result = Probe();
         assert([result[@"discovery"][@"source"] isEqual:@"inode-metadata-match"]);
-        assert([result[@"backingStage"] isEqual:@"file-read"]);
+        ExpectStage(result, @"backingStage", @"file-read");
         assert([result[@"backingErrorDetails"][@"errors"] count] > 0);
         assert([result[@"backingPathState"][@"code"] intValue] == EACCES);
         assert(![result[@"resolvedBackingPath"] containsString:temporary.lastPathComponent]);
 
-        failLease = YES;
+        // Reproduce the former broad injection with an already-cached identity.
+        // The cache is only a candidate: failed metadata revalidation must stop
+        // before any region lease. Log the actual top-level and nested stages.
+        assert([LocusCachedActivationSystemGroupPath isEqual:LocusLeaseAliasPath(temporary)]);
+        leaseFault = LeaseFaultAll;
         result = Probe();
-        assert([result[@"backingStage"] isEqual:@"region-lease"]);
+        ExpectStage(result, @"backingStage", @"systemgroup-discovery");
+        assert([result[@"discovery"][@"lastMetadataFailure"][@"stage"] isEqual:@"metadata-lease"]);
+        assert(metadataLeaseAttempts == 2 && metadataLeaseDenials == 2 && regionLeaseAttempts == 0);
+        assert(result[@"resolvedBackingPath"] == NSNull.null);
+        assert([result[@"effectiveCallSucceeded"] boolValue]);
+
+        leaseFault = LeaseFaultMetadata;
+        result = Probe();
+        ExpectStage(result, @"backingStage", @"systemgroup-discovery");
+        assert([result[@"discovery"][@"metadataLeaseFailures"] unsignedIntegerValue] == 2);
+        assert(metadataLeaseAttempts == 2 && metadataLeaseDenials == 2 && regionLeaseAttempts == 0);
+        assert(result[@"resolvedBackingPath"] == NSNull.null);
+
+        // Allow metadata identity revalidation and deny only Library/region_info.
+        leaseFault = LeaseFaultRegion;
+        result = Probe();
+        ExpectStage(result, @"backingStage", @"region-lease");
+        assert(metadataLeaseAttempts == 1 && metadataLeaseDenials == 0);
+        assert(regionLeaseAttempts == 1 && regionLeaseDenials == 1);
+        assert([result[@"discovery"][@"source"] isEqual:@"inode-metadata-match"]);
         assert(result[@"resolvedBackingPath"] != NSNull.null);
-        failLease = NO;
+        assert(LocusCachedActivationSystemGroupPath == nil);
+        ExpectStage(result, @"effectiveStage", @"complete");
+        assert([result[@"effectiveCallSucceeded"] boolValue]);
+        leaseFault = LeaseFaultNone;
+        result = Probe();
+        ExpectStage(result, @"backingStage", @"file-read"); // Denial did not leak into the next probe.
+        assert(regionLeaseAttempts == 1 && regionLeaseDenials == 0);
         normalPath = temporary;
         result = Probe();
+        ExpectStage(result, @"backingStage", @"resolver-identity");
+        assert(metadataLeaseAttempts == 0 && regionLeaseAttempts == 0);
         assert(![result[@"backingReadSucceeded"] boolValue]); // resolver path outside SystemGroup is refused
         normalPath = nil;
         LocusCachedActivationSystemGroupPath = temporary; // earlier synthetic metadata identity match
         NSString *backing = [directory stringByAppendingPathComponent:@"region_info.plist"];
         WritePlist(@[@"wrong root"], backing);
         result = Probe();
-        assert([result[@"backingStage"] isEqual:@"plist-parse"]);
+        ExpectStage(result, @"backingStage", @"plist-parse");
         assert([result[@"backingErrorDetails"][@"errors"][0][@"code"] intValue] == 23);
 
         WritePlist(@{@"CountryCode": @"CN", @"RegionInfo": @"CH/A", @"SoftwareBehaviors": @321}, backing);
@@ -392,13 +454,12 @@ int main(void)
         assert([result[@"mutationSchemaErrorDetails"][@"errors"][0][@"code"] intValue] == 24);
         WritePlist(@{@"CountryCode": @"CN", @"RegionInfo": @"CH/A", @"SoftwareBehaviors": @"321"}, backing);
         NSData *original = [NSData dataWithContentsOfFile:backing];
-        failAPI = NO;
         result = Probe();
-        assert([result[@"backingStage"] isEqual:@"complete"]);
+        ExpectStage(result, @"backingStage", @"complete");
         assert([result[@"backingSchemaValid"] boolValue]);
         assert([result[@"backingWriteAccessAvailable"] boolValue]); // temporary regular file only; probe does not mutate it
         assert(![result[@"mutationSchemaSupported"] boolValue]); // schema shape alone is not binary verification
-        assert([result[@"effectiveStage"] isEqual:@"complete"]);
+        ExpectStage(result, @"effectiveStage", @"complete");
         assert([original isEqual:[NSData dataWithContentsOfFile:backing]]);
 
         // Identifier-named container omitted from the inode results. Only a
@@ -425,14 +486,20 @@ int main(void)
         WritePlist(@{LocusMetadataIdentifier: @"unrelated"}, metadata);
         assert(!LocusResolveSystemGroupWithFallback(&discoveryError, [NSMutableDictionary new]));
         assert(discoveryError.code == 12); // path name alone must never match
-        namedEnabled = NO; denyPrivateMetadata = NO; normalPath = temporary;
+        namedEnabled = NO; denyPrivateMetadata = NO; normalPath = nil;
+        candidates = @[temporary];
+        LocusCachedActivationSystemGroupPath = nil;
+        WritePlist(@{LocusMetadataIdentifier: LocusActivationSystemGroup}, metadata);
 
         failSymbol = YES;
         result = Probe();
-        assert([result[@"effectiveStage"] isEqual:@"symbol-resolution"]);
+        ExpectStage(result, @"backingStage", @"complete");
+        ExpectStage(result, @"effectiveStage", @"symbol-resolution");
         failSymbol = NO; failFramework = YES;
         result = Probe();
-        assert([result[@"effectiveStage"] isEqual:@"framework-load"]);
+        ExpectStage(result, @"backingStage", @"complete");
+        ExpectStage(result, @"effectiveStage", @"framework-load");
+        failFramework = NO;
         assert([files removeItemAtPath:temporary error:NULL]);
         method_exchangeImplementations(read, testRead);
         puts("PASS: activation phase/error separation, redaction, read-only schema checks and lease cleanup (simulated APIs)");

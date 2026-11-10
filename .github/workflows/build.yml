@@ -13,7 +13,25 @@ jobs:
       - uses: actions/checkout@v7
       - run: sh Scripts/test-portable.sh
 
+  native-tests:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show native toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk macosx clang --version
+          xcrun --sdk macosx swiftc --version
+
+      - name: Portable regressions on macOS
+        run: sh Scripts/test-portable.sh
+
+      - name: Host regressions (simulated APIs, temporary files)
+        run: sh Scripts/test-macos.sh
+
   build:
+    # Compilation is independent of host tests so both report failures.
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -27,11 +45,8 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
-      - name: Host regressions (simulated APIs, temporary files)
-        run: |
-          sh Scripts/test-portable.sh
-          sh Scripts/test-macos.sh
-          plutil -lint Locus.xcodeproj/project.pbxproj Locus/Locus.entitlements
+      - name: Validate project files
+        run: plutil -lint Locus.xcodeproj/project.pbxproj Locus/Locus.entitlements
 
       - name: Build unsigned app
         run: |
@@ -46,8 +61,32 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             build
 
+  package:
+    # Never expose an IPA or upload an unvalidated intermediate app. Rebuild
+    # Release for packaging only after both configurations and all tests pass.
+    needs: [portable-tests, native-tests, build]
+    if: >-
+      ${{ needs.portable-tests.result == 'success' &&
+          needs.native-tests.result == 'success' &&
+          needs.build.result == 'success' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build validated unsigned Release app
+        run: |
+          xcodebuild \
+            -project Locus.xcodeproj \
+            -scheme Locus \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
       - name: Create unsigned IPA
-        if: matrix.configuration == 'Release'
         run: |
           APP="$(find "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos" \
             -maxdepth 1 -type d -name '*.app' -print -quit)"
@@ -60,7 +99,6 @@ jobs:
           zip -qry Locus-unsigned.ipa Payload
 
       - name: Upload IPA
-        if: matrix.configuration == 'Release'
         uses: actions/upload-artifact@v7
         with:
           name: Locus-unsigned
