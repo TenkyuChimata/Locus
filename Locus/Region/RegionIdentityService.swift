@@ -55,6 +55,10 @@ final class RegionIdentityService: ObservableObject {
     @Published private(set) var cacheUUID = "<unavailable>"
     @Published private(set) var prepared: RegionJournal?
     @Published var shouldRespring = false
+    let regionalDiagnostics = RuntimeDiagnosticsService()
+    @Published private(set) var regionalComparison = JapanRegionalBehaviorReference.observed.compare(.notRead, productType: "", build: "")
+    @Published private(set) var identityMatches = false
+    @Published private(set) var fullJapanAcceptance = FullJapanAcceptance.regionalNotVerified
 
     private let gestalt = MobileGestaltAccess.shared()
     private let activation = MobileActivationRegionAccess.shared()
@@ -65,6 +69,11 @@ final class RegionIdentityService: ObservableObject {
     private var activationInfo: [String: Any] = ["mutationSchemaSupported": false,
         "mutationSchemaError": "MobileActivation research has not been refreshed. Use its independent research refresh."]
     private var activationObservedAt: Date?
+
+    var activationSourceDiagnostics: [RegionAccessDiagnosticRow] {
+        [.init(title: "MobileActivation Observation", value: activationObservedAt?.formatted(date: .abbreviated, time: .standard) ?? "Not Tested")]
+            + activationDiagnostics.filter { ["MobileActivation API", "API Stage", "API Error", "SoftwareBehaviors"].contains($0.title) }
+    }
 
     // Present the existing read-only observation; evaluating rows performs no I/O.
     var activationDiagnostics: [RegionAccessDiagnosticRow] {
@@ -185,6 +194,9 @@ final class RegionIdentityService: ObservableObject {
         let context = deviceContext()
         build = context.build
         productType = context.productType
+        regionalDiagnostics.refreshRegionalBehavior()
+        regionalComparison = JapanRegionalBehaviorReference.observed.compare(
+            regionalDiagnostics.regionalBehaviorRead, productType: productType, build: build)
         var errors: [String] = []
         // Reuse the last explicit research observation. Ordinary refresh and
         // MobileGestalt actions never query/scan MobileActivation containers.
@@ -271,17 +283,29 @@ final class RegionIdentityService: ObservableObject {
                 detail: detail, originalAvailable: original, canApply: applicable && moduleBlocked == nil && !originalInvalid,
                 canRestore: restoreReady))
         }
+        var persistent: [String: Any] = [
+            "RegionCode": extra[JapanRegionMutation.regionCodeKey] ?? NSNull(),
+            "RegulatoryModelNumber": extra[JapanRegionMutation.regulatoryModelKey] ?? NSNull()
+        ]
+        if let key = try? RegionModuleMutation.identityKey(.regionInfo, extra: extra) { persistent["RegionInfo"] = extra[key] }
+        for item in assessments { persistent[item.question.rawValue] = item.cacheValue.map { NSNumber(value: $0) } }
+        identityMatches = FullJapanAcceptance.identityMatches(runtime: runtime, persistent: persistent,
+            regulatoryModel: JapanRegionProfile.verified(for: productType)?.regulatoryModel)
+        fullJapanAcceptance = FullJapanAcceptance.assess(identityMatches: identityMatches, behavior: regionalComparison)
+        // 旧 Full Japan バックアップの復元条件を保持する。新しい全体 Apply の許可とは分離する。
         let prerequisites = statuses.filter { $0.module != .intelligence }
-        var fullReady = prerequisites.allSatisfy(\.canApply)
+        var legacyRestoreReady = prerequisites.allSatisfy(\.canApply)
         var fullOriginal = false
         do { fullOriginal = try transactionStore?.originalAvailable(for: .fullJapan) ?? false }
-        catch { fullReady = false; errors.append("Full transaction backup: \(error.localizedDescription)") }
+        catch { legacyRestoreReady = false; errors.append("Full transaction backup: \(error.localizedDescription)") }
         statuses.append(.init(module: .fullJapan, cache: "See individual source values above", runtime: "See independent runtime values above",
-            expected: "J / J/A / verified model; false / true / false; activation JP / J/A / 25",
-            access: fullReady ? "Writable" : "Unsupported",
-            verification: "All persistent sources must pass together. AI capability is an independent option.",
-            detail: prerequisites.map { "\($0.module.title): \($0.canApply ? "ready" : $0.access)" }.joined(separator: "\n"),
-            originalAvailable: fullOriginal, canApply: fullReady, canRestore: fullOriginal && fullReady))
+            expected: "Six Japan Region Identity values + applicable complete Japan RegionalBehavior reference + restart and system-function verification",
+            access: "Apply Disabled",
+            verification: fullJapanAcceptance.rawValue,
+            detail: JapanRegionalBehaviorReference.persistenceBlock
+                + "\nRead-only matching does not verify other processes or real features. Restart/function verification pending."
+                + "\nApple Intelligence is independent. MobileActivation preset 25 is not proof of RegionalBehavior 0x19.",
+            originalAvailable: fullOriginal, canApply: false, canRestore: fullOriginal && legacyRestoreReady))
         modules = statuses
         errorMessage = errors.isEmpty ? nil : errors.joined(separator: "\n")
     }
@@ -291,6 +315,10 @@ final class RegionIdentityService: ObservableObject {
     @discardableResult
     func prepare(_ module: RegionModule, restore: Bool = false) -> Bool {
         guard !isBusy, prepared == nil else { return false }
+        guard module != .fullJapan || restore else {
+            errorMessage = JapanRegionalBehaviorReference.persistenceBlock
+            return false
+        }
         refresh()
         guard let status = modules.first(where: { $0.module == module }), restore ? status.canRestore : status.canApply else {
             errorMessage = "\(module.title): no supported layout, writable path or compatible backup."
@@ -343,7 +371,7 @@ final class RegionIdentityService: ObservableObject {
             try activation.validateRegionData(raw)
             return [try RegionModuleMutation.activationPlan(raw: raw)]
         }
-        if module == .fullJapan { return try fullPlans() }
+        if module == .fullJapan { throw RegionOperationError(JapanRegionalBehaviorReference.persistenceBlock) }
         let raw = try fileAccess.read(.mobileGestalt)
         return [try RegionModuleMutation.plan(module: module, raw: raw, productType: productType, build: build)]
     }
@@ -368,25 +396,6 @@ final class RegionIdentityService: ObservableObject {
         if let failure { errorMessage = failure }
     }
 
-    private func fullPlans() throws -> [RegionWritePlan] {
-        let mg = try fileAccess.read(.mobileGestalt)
-        let parsed = try RegionPlist.parse(mg)
-        guard let profile = JapanRegionProfile.verified(for: productType) else { throw JapanRegionError.unsupportedProductType(productType) }
-        let modified = try JapanRegionMutation.applying(to: parsed.root, profile: profile, build: build)
-        let layout = try JapanRegionCacheLayout.resolve(plist: parsed.root, build: build, productType: productType)
-        let extra = parsed.root["CacheExtra"] as? [String: Any] ?? [:]
-        let scope = RegionPatchScope(extraKeys: [JapanRegionMutation.regionCodeKey,
-            try RegionModuleMutation.identityKey(.regionInfo, extra: extra), JapanRegionMutation.regulatoryModelKey],
-            byteOffsets: layout.fields.map { $0.slot * 8 },
-            cacheUUID: parsed.root["CacheUUID"] as? String, cacheVersion: parsed.root["CacheVersion"] as? String,
-            cacheLength: (parsed.root["CacheData"] as? Data)?.count)
-        let after = RegionPlist.equal(parsed.root, modified) ? mg :
-            try PropertyListSerialization.data(fromPropertyList: modified, format: parsed.format, options: 0)
-        let ma = try fileAccess.read(.mobileActivation)
-        try activation.validateRegionData(ma)
-        return [try RegionModuleMutation.activationPlan(raw: ma), .init(file: .mobileGestalt, before: mg, after: after, scope: scope)]
-    }
-
     private func expected(_ module: RegionModule) -> String {
         if let question = module.question { return String(question.target) }
         switch module {
@@ -394,7 +403,7 @@ final class RegionIdentityService: ObservableObject {
         case .regionInfo: return "J/A"
         case .regulatoryModel: return JapanRegionProfile.verified(for: productType)?.regulatoryModel ?? "No verified model"
         case .intelligence: return "true / 1 (capability flag only)"
-        case .mobileActivation: return "JP / J/A / 25 (0x19)"
+        case .mobileActivation: return "Legacy preset: JP / J/A / 25; RegionalBehavior adoption unverified"
         default: return "See prerequisites"
         }
     }

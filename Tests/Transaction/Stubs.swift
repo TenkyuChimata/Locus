@@ -13,6 +13,10 @@ enum Fixture {
     static var writable = true
     static var denyActivation = true
     static var events: [String] = []
+    static var runtime: [String: Any] = [:]
+    static var runtimeError = false
+    static var chosen: [String: Any] = [:]
+    static var chosenError = false
     static var activationDiagnostics: [String: Any] = [
         "mutationSchemaSupported": false, "mutationSchemaError": "Identity / binary semantics unverified",
         "resolverSucceeded": false, "resolverStatus": 55,
@@ -37,12 +41,25 @@ final class MobileGestaltAccess {
     func readCacheData() throws -> Data { Fixture.events.append("readMG"); return Fixture.gestalt }
     func cacheWriteAccessStatus() -> [String: Any] { ["writable": Fixture.writable, "error": "simulated access"] }
     func runtimeAnswers(for questions: [String]) throws -> [String: Any] {
-        Dictionary(uniqueKeysWithValues: questions.map { ($0, NSNull()) })
+        Fixture.events.append("runtimeMG")
+        if Fixture.runtimeError { throw RegionOperationError("simulated runtime failure") }
+        return Dictionary(uniqueKeysWithValues: questions.map { ($0, Fixture.runtime[$0] ?? NSNull()) })
     }
+    func readCachePlist() throws -> Any { try RegionPlist.parse(readCacheData()).root }
     func replaceCacheData(_ expected: Data, with replacement: Data) throws {
         guard Fixture.writable && Fixture.gestalt == expected else { throw RegionOperationError("stale or denied") }
         Fixture.events.append("writeMG"); Fixture.gestalt = replacement
     }
+}
+final class DeviceTreeAccess {
+    static let instance = DeviceTreeAccess()
+    static func shared() -> DeviceTreeAccess { instance }
+    func chosenProperties(for names: [String]) throws -> [String: Any] {
+        Fixture.events.append("readDT")
+        if Fixture.chosenError { throw RegionOperationError("simulated DeviceTree failure") }
+        return Dictionary(uniqueKeysWithValues: names.map { ($0, Fixture.chosen[$0] ?? NSNull()) })
+    }
+    func properties(at path: String) throws -> [String: Any] { [:] }
 }
 final class MobileActivationRegionAccess {
     static let instance = MobileActivationRegionAccess()

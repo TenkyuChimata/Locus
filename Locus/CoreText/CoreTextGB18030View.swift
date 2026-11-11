@@ -13,6 +13,10 @@ struct CoreTextGB18030View: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("RegionalBehavior / Locale") {
+                    Text("CoreText normally reads RegionalBehaviorGB18030 through MobileGestalt and caches the result with dispatch_once. A separate currentLocale country-code CN condition can also affect glyph behavior.")
+                    Text("This experiment is limited to the Locus process. RegionalBehaviorGB18030=false does not guarantee all target glyphs render normally, or verify other apps. Unreviewed binaries remain blocked.")
+                }.font(.caption)
                 Section("Capability") {
                     valueRow("OS Build", probe["build"])
                     valueRow("Binary Supported", probe["binarySupported"])

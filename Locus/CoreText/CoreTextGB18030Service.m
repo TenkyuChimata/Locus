@@ -679,7 +679,7 @@ GERenderEmojiSample(CGFloat fontSize)
                 : (id)NSNull.null,
             @"staticImageBase": GEHexAddress(kGECoreTextStaticImageBase)
         }];
-    result[@"scope"] = @"Process-local rendering experiment; independent of system RegionalBehaviorGB18030.";
+    result[@"scope"] = @"Locus process only. The normal predicate reads RegionalBehaviorGB18030 via MG and caches it with dispatch_once; Locale CN can independently affect glyphs. A false value does not guarantee rendering or other-process behavior.";
     result[@"verificationStatus"] = @"Binary UUID alone does not verify predicate semantics or global addresses.";
 
     [result addEntriesFromDictionary:

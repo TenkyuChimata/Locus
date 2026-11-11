@@ -137,5 +137,75 @@ MainActor.assumeIsolated {
     cacheService.refresh()
     assert(!cacheService.modules.first { $0.module == .wapi }!.canApply)
     assert(!cacheService.modules.first { $0.module == .wapi }!.canRestore)
+
+    // 実際の読み取りサービスで順序・失敗の区別・古い成功値の破棄を検証する。
+    let diagnostics = RuntimeDiagnosticsService()
+    assert(JapanRegionalBehaviorReference.observed.compare(diagnostics.regionalBehaviorRead, productType: "", build: "").status == .notRead)
+    Fixture.events = []
+    Fixture.chosen = ["software-behavior": Data([0x41, 1, 0, 0]), "marketing-software-behavior": Data([0x19, 0, 0, 0])]
+    diagnostics.refreshRegionalBehavior()
+    assert(Fixture.events == ["readDT", "runtimeMG"])
+    assert(diagnostics.chosenObservedAt! <= diagnostics.regionalObservedAt!)
+    assert((diagnostics.chosenProperties["software-behavior"] as? Data) == Data([0x41, 1, 0, 0]))
+    assert(RuntimeDiagnosticsService.observationBoundary.contains("not a first-initialization snapshot"))
+    assert(DiagnosticValueFormatter.softwareBehavior("25") == "CFString: 25")
+    assert(DiagnosticValueFormatter.softwareBehavior(NSNumber(value: 25)) == "CFNumber: 25")
+    Fixture.runtimeError = true
+    diagnostics.refreshRegionalBehavior()
+    assert(JapanRegionalBehaviorReference.observed.compare(diagnostics.regionalBehaviorRead, productType: "", build: "").status == .readFailed)
+    assert(diagnostics.runtimeAnswers.isEmpty)
+    Fixture.runtimeError = false; Fixture.chosenError = true
+    diagnostics.refreshRegionalBehavior()
+    assert(diagnostics.chosenStatus.contains("Read Failed") && diagnostics.chosenProperties.isEmpty)
+    assert(diagnostics.errorMessage?.contains("DeviceTree") == true)
+    Fixture.chosenError = false
+    diagnostics.refresh()
+    assert(diagnostics.errorMessage == nil && diagnostics.cacheStatus == "Readable")
+
+    // 六項の永続値と runtime が全て一致しても、中国の地区動作なら Full Japan は未完了。
+    var target = known, targetExtra = known["CacheExtra"] as! [String: Any]
+    targetExtra[JapanRegionMutation.regionCodeKey] = "J"
+    targetExtra[JapanRegionMutation.regionInfoKey] = "J/A"
+    targetExtra[JapanRegionMutation.regulatoryModelKey] = "A3519"
+    var targetBytes = target["CacheData"] as! Data
+    targetBytes[3064] = 0; targetBytes[4048] = 1; targetBytes[5552] = 0
+    target["CacheExtra"] = targetExtra; target["CacheData"] = targetBytes
+    Fixture.gestalt = try! PropertyListSerialization.data(fromPropertyList: target, format: .binary, options: 0)
+    Fixture.runtime = ["RegionCode": "J", "RegionInfo": "J/A", "RegulatoryModelNumber": "A3519",
+        "green-tea": false, "not-green-tea": true, "wapi": false]
+    var china: [String: Any] = ["RegionalBehaviorChinaBrick": true, "RegionalBehaviorEUVolumeLimit": false,
+        "RegionalBehaviorGB18030": true, "RegionalBehaviorGoogleMail": false, "RegionalBehaviorNTSC": false,
+        "RegionalBehaviorNoPasscodeLocationTiles": false, "RegionalBehaviorNoVOIP": false,
+        "RegionalBehaviorNoWiFi": false, "RegionalBehaviorShutterClick": false, "RegionalBehaviorValid": true,
+        "RegionalBehaviorVolumeLimit": false, "SwBHValid": true, "SoftwareBehavior": Data(base64Encoded: "QQEAAAAAAAAAAAAAAAAAAA==")!]
+    for (key, value) in china where key != "SwBHValid" { Fixture.runtime[key] = value }
+    Fixture.runtime["RegionalBehaviorAll"] = china
+    Fixture.writable = true
+    let acceptance = RegionIdentityService(backupRoot: temporary.appendingPathComponent("acceptance"),
+        deviceContext: { ("iPhone18,3", "24B119") }, deviceID: "simulated-device")
+    acceptance.refresh()
+    assert(acceptance.identityMatches && acceptance.fullJapanAcceptance == .regionalMismatch)
+    assert(acceptance.regionalComparison.status == .mismatch)
+    assert(!acceptance.modules.first { $0.module == .fullJapan }!.canApply)
+    Fixture.runtime["RegionalBehaviorAll"] = NSNull()
+    Fixture.runtime["SoftwareBehavior"] = NSNull()
+    for key in JapanRegionalBehaviorReference.booleanQueries { Fixture.runtime[key] = NSNull() }
+    acceptance.refresh()
+    assert(acceptance.identityMatches && acceptance.fullJapanAcceptance == .regionalNotVerified)
+    china["RegionalBehaviorChinaBrick"] = false; china["RegionalBehaviorGB18030"] = false
+    china["RegionalBehaviorNTSC"] = true; china["RegionalBehaviorShutterClick"] = true
+    china["SoftwareBehavior"] = Data(base64Encoded: "GQAAAAAAAAAAAAAAAAAAAA==")!
+    for (key, value) in china where key != "SwBHValid" { Fixture.runtime[key] = value }
+    Fixture.runtime["RegionalBehaviorAll"] = china
+    Fixture.activationDiagnostics["mutationSchemaSupported"] = true // 旧条件を全て満たす仮定でも Apply は閉じたまま。
+    acceptance.refreshResearch()
+    assert(acceptance.modules.filter { $0.module != .fullJapan }.allSatisfy(\.canApply))
+    assert(acceptance.regionalComparison.status == .referenceConsistent)
+    assert(acceptance.fullJapanAcceptance == .regionalNotVerified)
+    Fixture.events = []
+    assert(!acceptance.prepare(.fullJapan))
+    assert(acceptance.errorMessage == JapanRegionalBehaviorReference.persistenceBlock)
+    assert(Fixture.events.isEmpty && acceptance.prepared == nil)
+    assert(!acceptance.modules.first { $0.module == .fullJapan }!.canApply)
     print("PASS: actual service preview/cancel/confirm, known-layout Apply/Restore, external drift, independent activation/full gates and read-only diagnostics (simulated native APIs)")
 }

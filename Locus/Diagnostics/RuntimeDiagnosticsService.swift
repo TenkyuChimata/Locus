@@ -1,5 +1,8 @@
+#if canImport(Combine)
 import Combine
+#endif
 import Foundation
+import CoreFoundation
 
 struct RuntimeDiagnosticQuestion: Identifiable {
     enum Group: Equatable { case region, hardware }
@@ -52,6 +55,48 @@ final class RuntimeDiagnosticsService: ObservableObject {
     @Published private(set) var syscfgProperties: [String: Any] = [:]
     @Published private(set) var errorMessage: String?
     @Published private(set) var isLoading = false
+    @Published private(set) var regionalBehaviorRead = RegionalBehaviorRead.notRead
+    @Published private(set) var chosenStatus = "Not Read"
+    @Published private(set) var chosenObservedAt: Date?
+    @Published private(set) var regionalObservedAt: Date?
+
+    static let observationBoundary = "DeviceTree is read before this refresh's MG queries. Earlier framework or process initialization is unknown; this is not a first-initialization snapshot. MG queries may initialize process caches."
+
+    // Region と Diagnostics で同じ読み取り経路を使う。表示の評価から I/O は行わない。
+    func refreshRegionalBehavior() {
+        guard !isLoading else { return }
+        isLoading = true
+        defer { isLoading = false }
+        var errors: [String] = []
+        readChosen(errors: &errors)
+        readRuntime(questions: JapanRegionalBehaviorReference.queries, errors: &errors)
+        errorMessage = errors.isEmpty ? nil : errors.joined(separator: "\n")
+    }
+
+    private func readChosen(errors: inout [String]) {
+        chosenObservedAt = Date()
+        do {
+            chosenProperties = try DeviceTreeAccess.shared().chosenProperties(
+                for: ["software-behavior", "marketing-software-behavior"])
+            chosenStatus = "Read — nil property means absent or unavailable to this API"
+        } catch {
+            chosenProperties = [:]
+            chosenStatus = "Read Failed: \(error.localizedDescription)"
+            errors.append("DeviceTree /chosen: \(error.localizedDescription)")
+        }
+    }
+
+    private func readRuntime(questions: [String], errors: inout [String]) {
+        regionalObservedAt = Date()
+        do {
+            runtimeAnswers = try MobileGestaltAccess.shared().runtimeAnswers(for: questions)
+            regionalBehaviorRead = .values(runtimeAnswers)
+        } catch {
+            runtimeAnswers = [:]
+            regionalBehaviorRead = .failed(error.localizedDescription)
+            errors.append("MobileGestalt runtime: \(error.localizedDescription)")
+        }
+    }
 
     func refresh() {
         guard !isLoading else { return }
@@ -63,14 +108,7 @@ final class RuntimeDiagnosticsService: ObservableObject {
         let deviceTree = DeviceTreeAccess.shared()
         let gestalt = MobileGestaltAccess.shared()
 
-        do {
-            chosenProperties = try deviceTree.chosenProperties(
-                for: ["software-behavior", "marketing-software-behavior"]
-            )
-        } catch {
-            chosenProperties = [:]
-            errors.append("DeviceTree /chosen: \(error.localizedDescription)")
-        }
+        readChosen(errors: &errors)
 
         do {
             let chosen = try deviceTree.properties(at: "IODeviceTree:/chosen")
@@ -102,14 +140,8 @@ final class RuntimeDiagnosticsService: ObservableObject {
             errors.append("MobileGestalt cache: \(error.localizedDescription)")
         }
 
-        do {
-            runtimeAnswers = try gestalt.runtimeAnswers(
-                for: runtimeDiagnosticQuestions.map(\.query)
-            )
-        } catch {
-            runtimeAnswers = [:]
-            errors.append("MobileGestalt runtime: \(error.localizedDescription)")
-        }
+        let questions = runtimeDiagnosticQuestions.map(\.query)
+        readRuntime(questions: questions + JapanRegionalBehaviorReference.queries.filter { !questions.contains($0) }, errors: &errors)
 
         errorMessage = errors.isEmpty ? nil : errors.joined(separator: "\n")
     }
@@ -139,28 +171,18 @@ enum DiagnosticValueFormatter {
     }
 
     static func softwareBehavior(_ value: Any?) -> String {
-        let raw = display(value)
-        guard let parsed = uint32(value) else { return raw }
-        return raw
-            + "\nUInt32: " + String(format: "0x%08X (%u)", parsed, parsed)
-            + "\nValid bit 0: " + ((parsed & 1) != 0 ? "true" : "false")
+        JapanRegionalBehaviorReference.describe(value)
     }
 
     static func deviceTreeData(_ value: Any?) -> String {
-        let raw = display(value)
+        let raw = JapanRegionalBehaviorReference.describe(value)
         guard let data = value as? Data, data.count >= 4 else { return raw }
         let bytes = [UInt8](data)
-        let little = UInt32(bytes[0])
-            | (UInt32(bytes[1]) << 8)
-            | (UInt32(bytes[2]) << 16)
-            | (UInt32(bytes[3]) << 24)
         let big = (UInt32(bytes[0]) << 24)
             | (UInt32(bytes[1]) << 16)
             | (UInt32(bytes[2]) << 8)
             | UInt32(bytes[3])
-        return raw
-            + "\nUInt32 LE: " + String(format: "0x%08X", little)
-            + "\nUInt32 BE: " + String(format: "0x%08X", big)
+        return raw + "\nUInt32 BE: " + String(format: "0x%08X", big)
     }
 
     static func syscfg(_ value: Any?) -> String {
@@ -188,21 +210,4 @@ enum DiagnosticValueFormatter {
         return output
     }
 
-    private static func uint32(_ value: Any?) -> UInt32? {
-        if let number = value as? NSNumber { return number.uint32Value }
-        if let string = value as? String {
-            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.lowercased().hasPrefix("0x")
-                ? UInt32(trimmed.dropFirst(2), radix: 16)
-                : UInt32(trimmed, radix: 10)
-        }
-        if let data = value as? Data, data.count >= 4 {
-            let bytes = [UInt8](data)
-            return UInt32(bytes[0])
-                | (UInt32(bytes[1]) << 8)
-                | (UInt32(bytes[2]) << 16)
-                | (UInt32(bytes[3]) << 24)
-        }
-        return nil
-    }
 }

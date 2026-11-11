@@ -16,7 +16,8 @@ or are authorized to manage. It is not affiliated with Apple.
 | Apple Intelligence capability | Changes a missing or canonical Boolean/integer flag to true/1; restores its original type or absence |
 | green-tea / not-green-tea / wapi | Known device/build/UUID layout, canonical valid Boolean slots, no CacheExtra overrides and file write access |
 | MobileActivation | Requires verified container identity, schema and reviewed storage/consumer semantics; separate refresh in Region |
-| Full Japan Region | Requires every identity, cache-behavior and activation prerequisite; AI is independent |
+| Japan RegionalBehavior | Complete runtime dictionary, independent Boolean queries and 16-byte CFData comparison against a user-observed Japan reference; reference device/build/environment remain unconfirmed |
+| Full Japan Region | Six-field Japan identity plus an applicable complete RegionalBehavior match, separately verified restart and system functions; aggregate Apply is disabled until a persistent RegionalBehavior mechanism is verified; AI is independent |
 | CoreText GB18030 | Separate process-local experiment, requiring a reviewed loaded binary and writable target memory |
 
 CacheData editing currently supports only **iPhone18,3 / iOS 27.2 / 24B119**,
@@ -32,6 +33,18 @@ MobileActivation and CoreText review registries remain empty and their actions
 remain unavailable. Identity and AI actions still require valid inputs, backups
 and actual on-device access. A capability flag does
 not establish service availability or successful activation.
+
+The six independent Japan identity actions retain their backup/restore workflow.
+Their success does not complete Full Japan. The Japan reference is `0x19` with
+ChinaBrick/GB18030=false and NTSC/ShutterClick=true; SwBHValid and
+RegionalBehaviorValid are checked separately, along with every other observed
+Boolean. An exact value comparison with unconfirmed reference scope is displayed
+as **Reference Consistent — Scope Not Verified**, never **Match**. Missing values,
+type errors and extra dictionary fields block strict acceptance; an observed
+value difference displays **RegionalBehavior Mismatch**. CacheExtra is not required.
+MobileActivation's legacy preset `25` is not proof that RegionalBehavior adopted
+`0x19`. Existing legacy transaction restoration/recovery remains available under
+its original safety checks. See [the evidence review and acceptance notes](Docs/RegionalBehavior-acceptance.md).
 
 ## Reading and diagnostics
 
@@ -55,6 +68,15 @@ or independent audit report is required. Loaded-image helpers remain available
 for the separate native experiments. Diagnostics does not request write access or
 scan MobileActivation containers. Its runtime answers and DeviceTree values are
 independent observations of current process APIs and IORegistry.
+
+RegionalBehavior Source Diagnostics reuses the existing DeviceTree and MG access
+interfaces. Each refresh attempts `/chosen/software-behavior` and
+`marketing-software-behavior` before its MG queries, preserving raw types, lengths,
+hex and Base64. Earlier initialization by frameworks or this process is unknown:
+this is **not a first-initialization snapshot**. Read-only MG calls can initialize
+process caches. MobileActivation API domain/code comes from the last explicit
+Advanced Research refresh; its separately displayed time may differ. Expanding
+diagnostics does not scan containers or authorize writes.
 
 ## Backups and recovery
 
@@ -91,6 +113,11 @@ recovery refuses a forced overwrite and retains the full backups for recovery.
 
 CoreText changes no system file or page protection and restores its temporary
 cached byte. Glyph-cache reuse can still make its rendering result inconclusive.
+Its normal GB18030 predicate reads RegionalBehaviorGB18030 through MG and caches
+the result with dispatch_once. A separate currentLocale country-code CN branch
+can also affect glyphs. The experiment is limited to Locus; a false MG value does
+not guarantee normal rendering of every target glyph or verify other processes.
+The existing experiment gate stays closed for unreviewed binaries.
 
 ## Build and sign
 
@@ -129,6 +156,10 @@ sh Scripts/check-ios-native.sh # iPhoneOS arm64 source checks; Xcode required
 
 Tests use synthetic data, temporary files and simulated private authorization
 APIs. Optional local device snapshots remain read-only and are never bundled.
+Set `LOCUS_MG_BINARY` to the existing identified 24B119 libMobileGestalt extraction
+to run the optional static Valid control-flow checks; without it those checks
+are explicitly skipped. No firmware is bundled and no write layout is authorized
+by these checks.
 CI runs portable checks, native host/Swift and iPhoneOS source checks, independent
 unsigned Debug/Release builds, then a gated Release rebuild and IPA packaging.
 A failed required check prevents IPA upload.

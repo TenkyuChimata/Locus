@@ -18,15 +18,21 @@ struct RegionIdentityView: View {
                     value("OS Build", service.build)
                     value("CacheUUID", service.cacheUUID)
                 }
-                moduleSection("Region Identity", [.regionCode, .regionInfo, .regulatoryModel])
-                moduleSection("Region Cache Behaviors", [.greenTea, .notGreenTea, .wapi])
+                Section("Japan Region Identity") {
+                    value("Six-field Acceptance", service.identityMatches ? "Values Match — Restart / Functions Not Verified" : "Not Verified / Values Differ")
+                    ForEach([RegionModule.regionCode, .regionInfo, .regulatoryModel, .greenTea, .notGreenTea, .wapi]) { moduleRow($0) }
+                }
+                Section("Japan RegionalBehavior") {
+                    RegionalBehaviorDiagnosticsContent(service: service.regionalDiagnostics, productType: service.productType,
+                        build: service.build, activationRows: service.activationSourceDiagnostics)
+                }
                 moduleSection("Additional Capabilities", [.intelligence])
                 Section {
                     Button("Refresh MobileActivation Research") { service.refreshResearch() }
                         .disabled(service.isBusy)
                     moduleRow(.mobileActivation)
                     NavigationLink("CoreText GB18030 Experiment") { CoreTextGB18030View() }
-                    Text("CoreText changes only a reviewed byte in this process temporarily. It is independent of system RegionalBehaviorGB18030.")
+                    Text("CoreText normally reads RegionalBehaviorGB18030 and caches it with dispatch_once. The experiment is limited to Locus; Locale CN can also affect glyphs. A false MG value does not guarantee every glyph renders normally. Unreviewed binaries remain blocked.")
                         .font(.caption).foregroundStyle(.secondary)
                 } header: { Text("Advanced Research") }
                 moduleSection("Full Japan Region", [.fullJapan])
@@ -90,10 +96,13 @@ struct RegionIdentityView: View {
                 value("Current", status.cache)
                 value("Target", status.expected)
                 value("Modification", status.access)
+                value("Verification", status.verification)
                 HStack {
-                    Button("Review Changes") {
-                        if service.prepare(module) { action = .init(module: module, restore: false) }
-                    }.disabled(service.isBusy || !status.canApply)
+                    if module != .fullJapan {
+                        Button("Review Changes") {
+                            if service.prepare(module) { action = .init(module: module, restore: false) }
+                        }.disabled(service.isBusy || !status.canApply)
+                    }
                     Spacer()
                     Button("Restore") {
                         if service.prepare(module, restore: true) { action = .init(module: module, restore: true) }

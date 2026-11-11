@@ -3,6 +3,7 @@ import UIKit
 
 struct RuntimeDiagnosticsView: View {
     @EnvironmentObject private var service: RuntimeDiagnosticsService
+    @EnvironmentObject private var regionService: RegionIdentityService
 
     var body: some View {
         NavigationStack {
@@ -23,6 +24,10 @@ struct RuntimeDiagnosticsView: View {
                 }
 
                 cacheSection
+                Section("Japan RegionalBehavior") {
+                    RegionalBehaviorDiagnosticsContent(service: service, productType: RealDeviceIdentity.productType,
+                        build: MobileGestaltAccess.currentOSBuild(), activationRows: regionService.activationSourceDiagnostics)
+                }
                 deviceTreeSection
                 syscfgSection
                 mobileGestaltSection(group: .hardware, title: "Hardware")
@@ -148,5 +153,51 @@ struct RuntimeDiagnosticsView: View {
                 .multilineTextAlignment(.trailing)
                 .textSelection(.enabled)
         }
+    }
+}
+
+/// 両画面で同じ観測値と比較関数を表示する。展開だけでは再取得しない。
+struct RegionalBehaviorDiagnosticsContent: View {
+    @ObservedObject var service: RuntimeDiagnosticsService
+    let productType: String
+    let build: String
+    let activationRows: [RegionAccessDiagnosticRow]
+
+    private var comparison: RegionalBehaviorComparison {
+        JapanRegionalBehaviorReference.observed.compare(service.regionalBehaviorRead, productType: productType, build: build)
+    }
+
+    var body: some View {
+        LabeledContent("Comparison", value: comparison.status.rawValue)
+        Text(comparison.detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+        DisclosureGroup("RegionalBehavior Source Diagnostics") {
+            Text(RuntimeDiagnosticsService.observationBoundary).font(.caption).foregroundStyle(.secondary)
+            diagnostic("DeviceTree Read", service.chosenStatus)
+            diagnostic("DeviceTree Attempt", service.chosenObservedAt?.formatted(date: .abbreviated, time: .standard) ?? "Not Read")
+            diagnostic("MG Attempt", service.regionalObservedAt?.formatted(date: .abbreviated, time: .standard) ?? "Not Read")
+            ForEach(["software-behavior", "marketing-software-behavior"], id: \.self) { key in
+                diagnostic("/chosen/\(key)", DiagnosticValueFormatter.deviceTreeData(service.chosenProperties[key]))
+            }
+            ForEach(["RegionalBehaviorsFromActivation", "RegionalBehaviorAll", "SoftwareBehavior"], id: \.self) { key in
+                diagnostic(key, JapanRegionalBehaviorReference.describe(service.runtimeAnswers[key]))
+            }
+            Text("MobileActivation API errors below come from the last explicit Advanced Research refresh; its time may differ. No container scan runs here.")
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(activationRows) { row in diagnostic(row.title, row.value) }
+            Text("Runtime Dictionary; CacheExtra is not required and does not provide a supported override for these outputs.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        DisclosureGroup("Required Fields / Types") {
+            ForEach(comparison.checks) { check in
+                diagnostic("\(check.id): \(check.result.rawValue)", check.detail)
+            }
+        }
+    }
+
+    private func diagnostic(_ title: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption.weight(.semibold))
+            Text(text).font(.caption2.monospaced()).textSelection(.enabled)
+        }.padding(.vertical, 2)
     }
 }
