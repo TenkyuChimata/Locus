@@ -148,86 +148,33 @@ static NSMutableDictionary<NSString *, WorseQueryGrant *> *Grants(void)
     return grants;
 }
 
-// Fixed reason codes only: no paths, signing identifiers, tokens or handles.
-static void WQEvent(NSMutableDictionary *audit, NSString *stage, NSString *status,
-                    NSTimeInterval start, int failure, NSString *reason, NSString *effects)
-{
-    if (!audit) return;
-    if (!audit[@"events"]) audit[@"events"] = [NSMutableArray array];
-    [audit[@"events"] addObject:[@{@"id": stage, @"status": status,
-        @"elapsedMilliseconds": @((NSProcessInfo.processInfo.systemUptime - start) * 1000),
-        @"errno": failure ? @(failure) : (id)NSNull.null, @"reason": reason, @"sideEffects": effects} mutableCopy]];
-}
-
-static void WQWorkspaceObservation(NSMutableDictionary *audit, LocusQueryWorkspace *w,
-                                    NSTimeInterval start, int preparation)
-{
-    if (preparation) {
-        // Begin may already have rolled back; do not count that rollback twice.
-        WQEvent(audit, @"workspace-preparation", @"INCOMPLETE", start + w->cleanupMilliseconds / 1000,
-                preparation, @"workspace-refused", @"possible");
-    }
-    if (!audit) return;
-    NSMutableArray *effects = audit[@"sideEffects"];
-    if (w->lockOpened) [effects addObject:@"app-group-lock-opened-or-created-and-retained"];
-    if (w->cachesWereMoved) [effects addObject:@"app-group-caches-directory-temporarily-renamed"];
-    if (w->linkWasCreated) [effects addObject:@"app-group-caches-symlink-created"];
-    BOOL residual = w->movedCaches || w->linked || (w->linkWasCreated && !w->cleanupAttempted);
-    if (w->cleanupAttempted || residual) {
-        BOOL clean = w->cleanupAttempted && !w->cleanupError && !residual;
-        audit[@"cleanupSucceeded"] = @([audit[@"cleanupSucceeded"] isEqual:@NO] ? NO : clean);
-        WQEvent(audit, @"workspace-cleanup", clean ? @"PASS" : @"FAIL",
-                NSProcessInfo.processInfo.systemUptime - w->cleanupMilliseconds / 1000, w->cleanupError,
-                clean ? @"workspace-restored" : @"workspace-recovery-required", w->cleanupAttempted ? @"yes" : @"no");
-        if (!w->cleanupAttempted) [audit[@"events"] lastObject][@"elapsedMilliseconds"] = NSNull.null;
-    }
-}
-
 // Caller holds the same process-wide lock as lease acquisition/release.
-static int64_t Acquire(NSString *target, NSString *group, NSString **detail, NSMutableDictionary *audit)
+static int64_t Acquire(NSString *target, NSString *group, NSString **detail)
 {
-    // Preserve upstream create_dir=false behavior. A denied metadata probe is
-    // not evidence of existence and must not authorize target creation.
+    // Preserve upstream create_dir=false: never create a system target.
     struct stat targetStat;
-    int targetRC = lstat(target.fileSystemRepresentation, &targetStat);
-    if (targetRC != 0 ||
+    if (lstat(target.fileSystemRepresentation, &targetStat) != 0 ||
         (!S_ISDIR(targetStat.st_mode) && !S_ISREG(targetStat.st_mode))) {
-        if (audit) audit[@"failureReason"] = @"target-metadata-unavailable-or-unsupported";
-        if (audit && targetRC) audit[@"authorizationErrno"] = @(errno);
-        if (detail) *detail = @"worse_query target does not exist, metadata access is denied, or it is not a regular file/directory. No target creation is permitted.";
+        if (detail) *detail = @"worse_query target is missing, inaccessible, or not a regular file/directory.";
         return -1;
-    }
-    if (audit) {
-        audit[@"directoryDevice"] = @((uint64_t)targetStat.st_dev);
-        audit[@"directoryInode"] = @((uint64_t)targetStat.st_ino);
     }
     NSFileManager *files = NSFileManager.defaultManager;
     NSURL *root = [files containerURLForSecurityApplicationGroupIdentifier:group];
-    if (!root) { if (audit) audit[@"failureReason"] = @"app-group-unavailable"; if (detail) *detail = @"App Group container became unavailable."; return -1; }
+    if (!root) { if (detail) *detail = @"App Group container became unavailable."; return -1; }
     NSURL *library = [root URLByAppendingPathComponent:@"Library" isDirectory:YES];
-    NSTimeInterval libraryStart = NSProcessInfo.processInfo.systemUptime;
-    if (audit) [audit[@"sideEffects"] addObject:@"app-group-library-create-directory-attempt"];
     if (![files createDirectoryAtURL:library withIntermediateDirectories:YES attributes:nil error:NULL]) {
-        if (audit) audit[@"failureReason"] = @"library-preparation-failed";
-        WQEvent(audit, @"workspace-preparation", @"INCOMPLETE", libraryStart, 0, @"library-preparation-failed", @"possible");
         if (detail) *detail = @"Could not prepare the App Group Library directory.";
         return -1;
     }
     WorseQueryAPI *a = SharedAPI();
-    int64_t handle = -1;
-    // Both flag variants are from upstream. Retry rejection/token failures once,
-    // based on the actual result, without an OS-version allowlist.
+    // Both flag variants are from upstream. Retry rejection/token failures once.
     const uint64_t flags[] = { 0x0000008000000000ULL, 0x0000000800000000ULL };
     for (NSUInteger attempt = 0; attempt < 2; attempt++) {
-        NSTimeInterval attemptStart = NSProcessInfo.processInfo.systemUptime;
         void *query = a->create();
         if (!query) {
-            if (audit) audit[@"failureReason"] = @"query-create-failed";
             if (detail) *detail = @"worse_query could not create a ContainerManager query.";
             return -1;
         }
-        // Preserve upstream ordering: configure the class/part query first,
-        // then replace the part path, then request the result.
         a->setClass(query, 7);
         xpc_object_t identifier = xpc_string_create(group.UTF8String);
         a->setGroupIdentifiers(query, identifier);
@@ -237,67 +184,31 @@ static int64_t Acquire(NSString *target, NSString *group, NSString **detail, NSM
         a->setPart(query, 3);
         a->setFlags(query, flags[attempt]);
         LocusQueryWorkspace workspace;
-        NSTimeInterval workspaceStart = NSProcessInfo.processInfo.systemUptime;
         int preparation = LocusQueryWorkspaceBegin(library.fileSystemRepresentation, target.fileSystemRepresentation, &workspace);
         if (preparation) {
-            if (audit) audit[@"failureReason"] = @"workspace-refused";
-            WQWorkspaceObservation(audit, &workspace, workspaceStart, preparation);
             a->freeQuery(query);
-            if (detail) *detail = [NSString stringWithFormat:@"worse_query workspace refused (%s). Existing App Group data was preserved. An interrupted query may require recovery of Library/.locus-worse-query-caches; do not delete it.", strerror(preparation)];
+            if (detail) *detail = [NSString stringWithFormat:@"worse_query workspace refused (%s). Existing App Group data was preserved. Keep Library/.locus-worse-query-caches for recovery if present.", strerror(preparation)];
             return -1;
         }
-        WQEvent(audit, @"workspace-preparation", @"PASS", workspaceStart, 0, @"workspace-prepared", @"yes");
         void *result = a->getSingleResult(query);
         char *token = result ? a->copySandboxToken(result) : NULL;
-        BOOL tokenIssued = token != NULL;
-        int consumeError = 0;
-        if (token) {
-            errno = 0;
-            handle = a->consume(token);
-            consumeError = handle < 0 ? errno : 0;
-            if (audit) {
-                [audit[@"sideEffects"] addObject:@"process-sandbox-token-consume-attempt"];
-                if (consumeError) audit[@"authorizationErrno"] = @(consumeError);
-            }
-            free(token);
-        }
-        if (audit) {
-            [audit[@"attempts"] addObject:@{@"variant": @(attempt + 1), @"resultReturned": @(result != NULL),
-                @"tokenIssued": @(tokenIssued), @"consumed": @(handle >= 0),
-                @"errno": consumeError ? @(consumeError) : (id)NSNull.null,
-                @"elapsedMilliseconds": @((NSProcessInfo.processInfo.systemUptime - attemptStart) * 1000)}];
-        }
+        int64_t handle = token ? a->consume(token) : -1;
+        free(token);
         a->freeQuery(query);
-        NSTimeInterval cleanupStart = NSProcessInfo.processInfo.systemUptime;
         int cleanup = LocusQueryWorkspaceEnd(&workspace, target.fileSystemRepresentation);
-        // Record effects and restoration separately; restoration precedes file IO.
-        WQWorkspaceObservation(audit, &workspace, cleanupStart, 0);
         if (cleanup) {
-            if (audit) audit[@"failureReason"] = @"workspace-recovery-required";
-            if (handle >= 0) {
-                NSTimeInterval releaseStart = NSProcessInfo.processInfo.systemUptime;
-                errno = 0;
-                int rc = a->release(handle), saved = rc ? errno : 0;
-                if (audit) { audit[@"referenceReleased"] = @YES; audit[@"tokenRevoked"] = @(rc == 0); }
-                WQEvent(audit, @"authorization-release", rc ? @"FAIL" : @"PASS", releaseStart, saved,
-                        rc ? @"token-release-failed" : @"token-released", @"yes");
-                if (rc) {
-                    WorseQueryGrant *pending = [WorseQueryGrant new];
-                    pending.handle = handle;
-                    Grants()[target] = pending;
-                }
+            if (handle >= 0 && a->release(handle) != 0) {
+                // Keep failed releases for retry before any new grant.
+                WorseQueryGrant *pending = [WorseQueryGrant new];
+                pending.handle = handle;
+                Grants()[target] = pending;
             }
-            if (detail) *detail = [NSString stringWithFormat:@"worse_query workspace restoration failed (%s). Query aborted; preserved data remains in the App Group Library. Inspect it before retrying.", strerror(cleanup)];
+            if (detail) *detail = [NSString stringWithFormat:@"worse_query workspace restoration failed (%s). Inspect the preserved App Group Library before retrying.", strerror(cleanup)];
             return -1;
         }
-        if (handle >= 0) {
-            // A successful fallback is not a failure carrying an earlier errno.
-            [audit removeObjectForKey:@"authorizationErrno"];
-            return handle;
-        }
+        if (handle >= 0) return handle;
     }
-    if (audit) audit[@"failureReason"] = @"query-rejected-or-token-unusable";
-    if (detail) *detail = @"worse_query was rejected or no usable sandbox token was issued with either upstream flag. Check signing and device support; no target directory was created.";
+    if (detail) *detail = @"worse_query access denied with both query flags. Check App Group signing and device support.";
     return -1;
 }
 
@@ -316,74 +227,38 @@ static int64_t Acquire(NSString *target, NSString *group, NSString **detail, NSM
 
 + (instancetype)leaseForPath:(NSString *)path error:(NSString **)error
 {
-    return [self leaseForPath:path error:error audit:nil];
-}
-
-+ (instancetype)leaseForPath:(NSString *)path error:(NSString **)error audit:(NSMutableDictionary *)audit
-{
     @synchronized (WorseQueryLease.class) {
-        if (audit) {
-            [audit removeAllObjects];
-            audit[@"events"] = [NSMutableArray array];
-            audit[@"sideEffects"] = [NSMutableArray array];
-            audit[@"attempts"] = [NSMutableArray array];
-            audit[@"grantReused"] = @NO;
-        }
         if (!path.isAbsolutePath || [path rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound) {
-            if (audit) audit[@"failureReason"] = @"target-outside-scope";
-            if (error) *error = @"worse_query requires an absolute target path without NUL bytes.";
+            if (error) *error = @"worse_query requires an absolute target path without control characters.";
             return nil;
         }
         NSString *normalized = path.stringByStandardizingPath;
         if ([normalized hasPrefix:@"/private/var/"]) normalized = [normalized substringFromIndex:8];
-        // The bridge is private to the existing SystemGroup business paths.
         if (![normalized hasPrefix:@"/var/containers/Shared/SystemGroup/"]) {
-            if (audit) audit[@"failureReason"] = @"target-outside-scope";
             if (error) *error = @"worse_query target is outside Locus's SystemGroup access scope.";
             return nil;
         }
         WorseQueryGrant *grant = Grants()[normalized];
         if (grant && grant.users == 0) {
-            NSTimeInterval releaseStart = NSProcessInfo.processInfo.systemUptime;
-            errno = 0;
-            int rc = SharedAPI()->release(grant.handle), saved = rc ? errno : 0;
-            WQEvent(audit, @"authorization-release", rc ? @"FAIL" : @"PASS", releaseStart, saved,
-                    rc ? @"prior-token-release-failed" : @"prior-token-released", @"yes");
-            if (rc != 0) {
-                if (audit) audit[@"failureReason"] = @"prior-token-release-failed";
-                if (audit) { audit[@"referenceReleased"] = @NO; audit[@"tokenRevoked"] = @NO; }
-                if (error) *error = @"A previous worse_query sandbox handle could not be released. Refusing to lose or duplicate the outstanding handle; retry later.";
+            if (SharedAPI()->release(grant.handle) != 0) {
+                if (error) *error = @"A previous worse_query handle could not be released. Retry later.";
                 return nil;
             }
             [Grants() removeObjectForKey:normalized];
             grant = nil;
         }
         if (!grant) {
-            NSString *detail = WorseQueryAccessConfigurationError();
-            if (detail) {
-                if (audit) audit[@"failureReason"] = WorseQueryBridgeAvailable() ? @"signed-app-group-unavailable" : @"authorization-api-unavailable";
-                if (error) *error = detail; return nil;
-            }
-            NSString *group = ResolveGroup(&detail);
-            if (!group && audit) audit[@"failureReason"] = @"signed-app-group-unavailable";
-            int64_t handle = group ? Acquire(normalized, group, &detail, audit) : -1;
-            if (handle < 0) { if (error) *error = detail; return nil; }
-            grant = [WorseQueryGrant new]; grant.handle = handle;
-            Grants()[normalized] = grant;
-        } else if (audit) {
-            audit[@"grantReused"] = @YES;
-            struct stat state;
-            int rc = lstat(normalized.fileSystemRepresentation, &state);
-            if (rc || !S_ISDIR(state.st_mode)) {
-                if (audit) {
-                    audit[@"failureReason"] = @"target-metadata-unavailable-or-unsupported";
-                    if (rc) audit[@"authorizationErrno"] = @(errno);
-                }
-                if (error) *error = @"Could not observe the existing lease target directory identity.";
+            NSString *detail = nil;
+            if (!WorseQueryBridgeAvailable()) {
+                if (error) *error = @"worse_query ContainerManager or sandbox extension API unavailable.";
                 return nil;
             }
-            audit[@"directoryDevice"] = @((uint64_t)state.st_dev);
-            audit[@"directoryInode"] = @((uint64_t)state.st_ino);
+            NSString *group = ResolveGroup(&detail);
+            int64_t handle = group ? Acquire(normalized, group, &detail) : -1;
+            if (handle < 0) { if (error) *error = detail; return nil; }
+            grant = [WorseQueryGrant new];
+            grant.handle = handle;
+            Grants()[normalized] = grant;
         }
         grant.users++;
         WorseQueryLease *lease = [WorseQueryLease new];
@@ -395,34 +270,14 @@ static int64_t Acquire(NSString *target, NSString *group, NSString **detail, NSM
 }
 - (void)invalidate
 {
-    [self invalidateWithAudit:nil];
-}
-- (void)invalidateWithAudit:(NSMutableDictionary *)audit
-{
     @synchronized (WorseQueryLease.class) {
         if (!_active) return;
-        NSTimeInterval start = NSProcessInfo.processInfo.systemUptime;
         WorseQueryGrant *grant = Grants()[_targetPath];
-        BOOL revoked = NO;
-        BOOL releaseFailed = NO;
-        int failure = 0;
-        if (grant && --grant.users == 0) {
-            // A failed release remains tracked and is retried before a new lease;
-            // never lose an outstanding kernel handle or release it twice.
-            errno = 0;
-            if (SharedAPI()->release(grant.handle) == 0) {
-                [Grants() removeObjectForKey:_targetPath]; revoked = YES;
-            } else { releaseFailed = YES; failure = errno; }
-        }
+        // A failed release stays tracked with zero users and is retried before
+        // the next acquisition. Each lease returns its reference exactly once.
+        if (grant && --grant.users == 0 && SharedAPI()->release(grant.handle) == 0)
+            [Grants() removeObjectForKey:_targetPath];
         _active = NO;
-        if (audit) {
-            audit[@"referenceReleased"] = @(grant != nil);
-            audit[@"tokenRevoked"] = @(revoked);
-            audit[@"otherLeaseHoldersRemain"] = @(grant && grant.users > 0);
-        }
-        WQEvent(audit, @"authorization-release", releaseFailed || !grant ? @"FAIL" : @"PASS", start, failure,
-                releaseFailed ? @"token-release-failed" : !grant ? @"lease-accounting-unavailable" :
-                    revoked ? @"token-released" : @"shared-reference-returned-token-retained", @"yes");
     }
 }
 - (void)dealloc { [self invalidate]; }

@@ -1,182 +1,123 @@
 # Locus
 
-Locus is a focused iOS/iPadOS region and runtime research utility. Japan Region
-contains independent modules for MobileGestalt region identity, regional cache
-behaviors, Apple Intelligence capability, MobileActivation, and a strict full
-Japan transaction. Diagnostics and the process-local CoreText experiment remain
-separate. Hardware identity is never rewritten.
+Locus is an iOS/iPadOS MobileGestalt management tool with device diagnostics,
+independent region and capability changes, and backed-up transactions. Hardware
+identity is never rewritten. It uses private APIs and requires a device you own
+or are authorized to manage. It is not affiliated with Apple.
 
-Locus uses private APIs and is intended for devices you own or are authorized to
-research. It is not affiliated with Apple.
+## Features and availability
 
-## Current feature status
+| Feature | Behavior and requirements |
+| --- | --- |
+| Diagnostics | Model, iOS/build, cache access, CacheUUID, CacheVersion, CacheData length, runtime answers and DeviceTree values |
+| RegionCode | Changes an existing string to J; exact-value restore |
+| RegionInfo | Changes exactly one existing region-info key to J/A; ambiguous dual keys are rejected |
+| RegulatoryModelNumber | Uses the existing real-ProductType whitelist for the Japan model |
+| Apple Intelligence capability | Changes a missing or canonical Boolean/integer flag to true/1; restores its original type or absence |
+| green-tea / not-green-tea / wapi | Requires an independently reviewed binary/cache mapping, valid values and file access |
+| MobileActivation | Requires verified container identity, schema and reviewed storage/consumer semantics; separate refresh in Region |
+| Full Japan Region | Requires every identity, cache-behavior and activation prerequisite; AI is independent |
+| CoreText GB18030 | Separate process-local experiment, requiring a reviewed loaded binary and writable target memory |
 
-| Module | Implemented behavior | Write gate |
-| --- | --- | --- |
-| RegionCode | Existing string to J; independent exact-value restore | Typed existing key and file access |
-| RegionInfo | Existing old **or** current key to J/A; no alias synthesis | Exactly one existing string alias; dual aliases remain unsupported |
-| RegulatoryModelNumber | Japan model from the existing ProductType whitelist | Real device profile and typed existing key |
-| Apple Intelligence capability | A62OafQ85EJAiiqKn4agtg to Boolean true/integer 1; restore original type or absence | Missing or canonical Boolean/integer 0 or 1 and file access |
-| green-tea / not-green-tea / wapi | Independent descriptor diagnostics, bounded patches and restore | Exact binary review, cache identity/version/length, canonical values/validity and file access |
-| MobileActivation | Independent diagnostics, schema planning and transactional restore path | Verified container identity, existing file, schema and reviewed storage/consumer binary semantics |
-| CoreText GB18030 | Loaded UUID probe and temporary process-local rendering experiment | Reviewed predicate/data references and existing writable memory |
-| Full Japan Region | All identity, three cache behaviors and activation sources in one transaction | Every prerequisite must pass; AI and CoreText are independent |
+The MobileGestalt mapping, MobileActivation and CoreText review registries are
+empty. Their gated actions remain unavailable. Identity and AI actions still
+require valid inputs, backups and actual on-device access. A capability flag does
+not establish service availability or successful activation.
 
-**No current MobileGestalt semantic review, MobileActivation storage/consumer
-fingerprint or CoreText fingerprint is registered. Those writes remain disabled.**
-Independent identity and AI actions do not depend on those reviews. They still
-require authorized on-device file access; host tests do not prove that access.
+## Reading and diagnostics
 
-The dynamic scanner snapshots the process's loaded MobileGestalt image using
-checked Mach VM reads. It examines __TEXT.__cstring and relevant __const sections
-in __AUTH_CONST, __DATA_CONST and __DATA, with segment/section/ASLR bounds checks.
-The 64-byte descriptor, +0x3A index and +0x3C type-11 Boolean are hypotheses.
-Its five levels are Unavailable, Candidate, Structurally Valid, Binary Verified
-and Writable. A masked PAC pointer match, a unique cstring UUID, matching answers,
-or 8N+N bytes alone never grants write permission. wapi is scanned independently;
-there is no historical-offset fallback.
+Diagnostics and Region share `MobileGestaltAccess`. A read acquires a worse_query
+lease for the existing MobileGestalt cache directory, opens the fixed absolute
+`/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist`
+path, checks that the opened object is a nonempty regular file of at most 16 MiB,
+and reads it once. Plist display additionally requires a dictionary. The file
+opens with `O_RDONLY | O_NOFOLLOW`; descriptors and leases are released on exit.
+Permission and parsing failures appear in Diagnostics and can be retried with
+Refresh. Raw-byte reads remain available to the backup/transaction code.
 
-Identity changes touch only their allowed CacheExtra key. RegionCode and sales
-region are independent. RegionInfo never adds a second alias; when both aliases
-exist, diagnostics show both and writes require further semantic review. The AI
-capability flag does not establish Settings visibility, model-download access
-or working Apple Intelligence services.
+The fixed system ancestors are trusted and may resolve through symlinks. Final
+component `O_NOFOLLOW` is **not** equivalent to opening every ancestor without
+following links. Ordinary reads neither open `/private` separately nor require
+runtime descriptor mapping, hashes, repeated reads or an audit export. A single
+read does not promise a coherent snapshot during a concurrent system update.
 
-## Backups, transactions and recovery
+Loaded-image inspection remains part of the separate mutation checks; it is not
+a prerequisite for Diagnostics. Diagnostics does not request write access or
+scan MobileActivation containers. Its runtime answers and DeviceTree values are
+independent observations of current process APIs and IORegistry.
 
-All persistent actions use one serialized coordinator and an inode-preserving
-compare-and-replace writer. Before writing it saves complete original and intended
-file bytes, SHA-256 checksums, a fixed key/byte whitelist, device model/build and
-a durable transaction phase. Exact current bytes must still match before each
-write. Complete readback verifies the result; failures roll back in reverse order
-and report verified rollback or recovery required.
+## Backups and recovery
 
-The new Documents/Region Module Backups directory contains immutable first-module
-baseline references and per-operation journals. Legacy Japan Region Transaction
-Backups and user-saved originals are retained. Original means the state before
-Locus's first edit, **not factory provenance**. An already-J/A no-op creates no
-invented original. Restore changes only the selected module's exact saved values
-(including AI key absence and validity bytes), preserving other modules. A system
-update or external target-field change requires review instead of forced restore.
+Persistent actions use the serialized Region coordinator. It saves original and
+intended bytes, SHA-256 checksums, device/build identity, a fixed write scope and
+a durable journal before writing. Exact current bytes must match before each
+write. Readback verifies results; failures attempt reverse-order rollback and
+report verified recovery or recovery required.
 
-After interruption, writes to the affected source are blocked until its journal is recovered; a standalone activation failure does not block unrelated MobileGestalt modules.
-Preparing/prepared phases cannot have written system files and are closed without
-overwriting external changes. A full transaction requires both source plans inside the coordinator itself.
-Writing/rollback phases accept only exact original
-or intended file contents. Unrecognized torn/corrupt contents retain the original
-backups and require manual investigation; in-place truncation cannot promise
-power-loss atomicity or a cross-inode atomic commit. Do not delete the app or its container while recovery is
-outstanding. Export the app container through Xcode before reinstalling.
+`Documents/Region Module Backups` holds first-module originals and operation
+journals. Legacy backups are retained. "Original" means before Locus's first
+edit, not factory provenance. Restore preserves unrelated fields and rejects
+incompatible updates or external target-field changes. An unfinished journal
+blocks writes to its affected source until recovered. Keep the app container and
+backups while recovery is pending; export the container through Xcode before
+reinstalling.
 
-CoreText never changes system files, memory page protection or the once token.
-Its reviewed-path experiment restores its one cached byte in cleanup and uses
-identical rendering inputs for baseline/override/restored controls. Glyph-cache
-reuse can still make rendering comparisons inconclusive. It is independent of
-the system RegionalBehaviorGB18030 answer.
+The inode-preserving writer uses truncation and in-place writes. Partial content
+can be visible to other readers; neither power-loss atomicity nor cross-file
+atomicity is guaranteed. This read simplification does not relax those write
+gates or remove backups, compare-and-replace, readback or recovery.
 
-See [the review and device acceptance procedure](docs/region-modules-review.md)
-for evidence gaps, risks, changed files and iPhone18,3 / 24B119 checks.
+CoreText changes no system file or page protection and restores its temporary
+cached byte. Glyph-cache reuse can still make its rendering result inconclusive.
 
-## Building and signing
+## Build and sign
 
-Requirements:
+Use Xcode with the project's iOS SDK, Developer Mode, and your own signing team.
+The project/scheme is `Locus`, with default bundle identifier
+`io.github.tenkyuchimata.locus`. No team is hardcoded. Register a dedicated App
+Group `group.<your Bundle Identifier>` and authorize it in the provisioning
+profile. Debug and Release both use `Locus/Locus.entitlements`.
 
-- Xcode with the iOS SDK required by the project
-- an authorized iPhone or iPad whose individual capability checks pass
-- Developer Mode and your own signing configuration for device installation
+The bridge checks signed entitlements and group-container access. A single
+signer-remapped group is accepted; ambiguous multiple groups require the
+bundle-derived group. Re-signing an unsigned IPA must provide usable App Group
+entitlements. Compilation alone does not establish device access.
 
-The product and scheme are `Locus`; the default bundle identifier is
-`io.github.tenkyuchimata.locus`. No development team is hardcoded. Open
-`Locus.xcodeproj`, select your own team (and change the bundle identifier if
-your signing account requires it). Register a dedicated App Group named
-`group.<your Bundle Identifier>` and authorize it in your provisioning profile.
-Both Debug and Release use `Locus/Locus.entitlements`, with
-`group.$(PRODUCT_BUNDLE_IDENTIFIER)`; no Team ID is embedded.
-
-The bridge reads the actual process signature via Security task APIs and checks
-that FileManager can open the group container. When Security introspection is
-unavailable, only the bundle-derived group is probed through the container API.
-A signer-remapped single App
-Group is accepted; ambiguous multiple groups require the bundle-derived group.
-Unsigned builds can be packaged without provisioning, but installation/re-signing
-must supply authorized App Group entitlements. Missing or mismatched signing
-produces an explicit error; unsigned compilation does not validate access.
-
-worse_query temporarily uses the group's `Library/Caches` path. Existing data
-is moved aside and restored without recursive removal. Cross-process locking
-and process-wide serialization protect query setup. If execution is interrupted,
-Locus refuses any residual symlink or `.locus-worse-query-caches` backup instead
-of deleting it. Preserve that backup and inspect the group before recovery.
-Use a dedicated group; unrelated apps should not access its Caches during a query.
-
-Unsigned validation/build:
+worse_query temporarily replaces the dedicated group's `Library/Caches` path.
+Locus preserves existing data by rename and restores the original directory,
+with process serialization and a cross-process lock. Residual links or
+`.locus-worse-query-caches` backups are refused rather than deleted. Inspect and
+preserve them after interruption. Other apps should not share this workspace.
 
 ```sh
-xcodebuild \
-  -project Locus.xcodeproj \
-  -scheme Locus \
-  -configuration Release \
-  -sdk iphoneos \
-  -destination 'generic/platform=iOS' \
+xcodebuild -project Locus.xcodeproj -scheme Locus -configuration Release \
+  -sdk iphoneos -destination 'generic/platform=iOS' \
   -derivedDataPath /tmp/LocusDerivedData \
-  CODE_SIGNING_ALLOWED=NO \
-  CODE_SIGNING_REQUIRED=NO \
-  build
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
 ```
 
-The GitHub Actions workflow runs portable regressions, macOS native regressions,
-iPhoneOS arm64 native syntax checks, and generic unsigned Debug/Release device
-builds in independent jobs. A failed test does not prevent either build from
-reporting its result and keeps CI red.
-Only after all jobs succeed does the packaging job rebuild unsigned Release,
-place `Locus.app` under `Payload`, and upload `Locus-unsigned.ipa`.
-
-Do not treat a simulator or host build as validation of private device behavior.
-Persistent mutation and CoreText address validation require on-device testing.
-
-## Architecture
-
-- `Region/` — independent planners, descriptor assessments, ProductType profiles,
-  fixed write scopes, immutable originals, SHA-256 journals and transaction UI
-- `Diagnostics/` — the compact read-only diagnostics model and UI
-- `CoreText/` — loaded-binary CoreText validation/experiment and rendering UI
-- `LowLevel/` — focused Objective-C bridges for MobileGestalt,
-  MobileActivation, DeviceTree/IOKit, and worse_query
-- `Support/` — the retained optional SpringBoard refresh implementation
-
-## Licensing and attribution
-
-Locus as a combined distribution is licensed **GPL-3.0-only**; the complete GNU
-GPL version 3 text is in [LICENSE](LICENSE). The previous MIT copyright and
-permission notice, including GestaltEdit and Locus contributors, is preserved in
-[LICENSES/Locus-original-MIT.txt](LICENSES/Locus-original-MIT.txt). The adapted
-worse_query source retains Taj C (forcequit)'s GPL-3.0-or-later notice. All three
-license/notice files are included in the app resources.
-
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) records code origins and scope.
-Locus retains its own Region/Diagnostics/CoreText architecture and UI. GestaltEdit
-was consulted only for its local worse_query integration; no editor, presets,
-automation or backup UI was imported.
-
-## Regression checks
+## Validation
 
 ```sh
-sh Scripts/test-portable.sh  # C sanitizer/Python checks; also Swift when available
-sh Scripts/test-swift.sh     # actual pure Swift planner/scanner/coordinator/service
-sh Scripts/test-macos.sh     # macOS Objective-C/Mach-O bridge and Swift regressions
-sh Scripts/check-ios-native.sh # actual iPhoneOS arm64 SDK syntax checks; requires Xcode
+sh Scripts/test-portable.sh    # C sanitizers, Python/project checks; Swift if available
+sh Scripts/test-swift.sh       # planners, mapping write gates, journals, recovery
+sh Scripts/test-macos.sh       # native access/write/image tests and Swift; Apple SDKs
+sh Scripts/check-ios-native.sh # iPhoneOS arm64 source checks; Xcode required
 ```
 
-The Swift suite runs the actual planners, scanner and journal engine with synthetic
-fixtures and simulated I/O. If the two local device snapshots exist, an optional
-read-only test also checks in-memory edits and exact restore against them; they
-are not bundled or published. Native tests exercise checked loaded-image reads
-with synthetic Mach-O headers and the actual writer on temporary files.
-The macOS suite also checks signing/query/handle behavior with simulated private
-APIs. None is an on-device compatibility or functional test.
+Tests use synthetic data, temporary files and simulated private authorization
+APIs. Optional local device snapshots remain read-only and are never bundled.
+CI runs portable checks, native host/Swift and iPhoneOS source checks, independent
+unsigned Debug/Release builds, then a gated Release rebuild and IPA packaging.
+A failed required check prevents IPA upload.
 
-The Linux review environment ran the portable and Swift suites. macOS native
-regressions and unsigned iOS Debug/Release builds require Apple SDKs and are
-pending for this revision; no IPA or real-device validation is claimed. The CI
-failure analysis and validation limits are recorded in
-[the CI regression notes](docs/ci-native-regressions.md).
+Linux checks cannot validate Objective-C/Swift against Apple SDKs, device sandbox
+access or the actual UI. macOS tests, iPhoneOS Debug/Release builds, packaging and
+real-device read/refresh checks must be verified in their respective environments.
+
+## License
+
+Locus is **GPL-3.0-only**; see [LICENSE](LICENSE). The inherited MIT notice is
+preserved in [LICENSES/Locus-original-MIT.txt](LICENSES/Locus-original-MIT.txt).
+worse_query retains its original GPL-3.0-or-later notice. These notices and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) are bundled with the app.

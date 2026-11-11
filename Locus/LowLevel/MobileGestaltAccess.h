@@ -19,6 +19,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)replaceCacheData:(NSData *)expected withData:(NSData *)replacement error:(NSError **)error
     NS_SWIFT_NAME(replaceCacheData(_:with:));
 
+// Scoped authorization; fixed path, final-component no-follow, bounded read.
 - (nullable NSDictionary *)readCachePlistWithError:(NSError **)error
     NS_SWIFT_NAME(readCachePlist());
 - (nullable NSData *)readCacheDataWithError:(NSError **)error

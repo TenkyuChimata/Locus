@@ -7,17 +7,9 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
 
 static const char *const backupName = ".locus-worse-query-caches";
-
-static double workspaceMilliseconds(void)
-{
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now)) return 0;
-    return (double)now.tv_sec * 1000 + (double)now.tv_nsec / 1000000;
-}
 
 static void closeWorkspace(LocusQueryWorkspace *w)
 {
@@ -30,8 +22,6 @@ int LocusQueryWorkspaceEnd(LocusQueryWorkspace *w, const char *target)
 {
     int failure = 0;
     if (w->libraryFD < 0) return 0;
-    double started = workspaceMilliseconds();
-    w->cleanupAttempted = true;
     if (w->linked) {
         struct stat st;
         char destination[PATH_MAX];
@@ -58,8 +48,6 @@ int LocusQueryWorkspaceEnd(LocusQueryWorkspace *w, const char *target)
     }
     if (!failure && fsync(w->libraryFD) != 0) failure = errno;
     closeWorkspace(w);
-    w->cleanupError = failure;
-    w->cleanupMilliseconds = workspaceMilliseconds() - started;
     return failure;
 }
 
@@ -81,7 +69,6 @@ int LocusQueryWorkspaceBegin(const char *library, const char *target, LocusQuery
         closeWorkspace(w);
         return EINVAL;
     }
-    w->lockOpened = true;
     if (flock(w->lockFD, LOCK_EX | LOCK_NB) != 0) {
         int failure = errno;
         closeWorkspace(w);
@@ -103,7 +90,6 @@ int LocusQueryWorkspaceBegin(const char *library, const char *target, LocusQuery
             int failure = errno; closeWorkspace(w); return failure;
         }
         w->movedCaches = true;
-        w->cachesWereMoved = true;
     } else if (errno != ENOENT) {
         int failure = errno; closeWorkspace(w); return failure;
     }
@@ -112,7 +98,6 @@ int LocusQueryWorkspaceBegin(const char *library, const char *target, LocusQuery
         (void)LocusQueryWorkspaceEnd(w, target);
         return failure;
     }
-    w->linkWasCreated = true;
     if (fstatat(w->libraryFD, "Caches", &st, AT_SYMLINK_NOFOLLOW) != 0) {
         int failure = errno;
         // Ownership cannot be established; preserve the link and backup.

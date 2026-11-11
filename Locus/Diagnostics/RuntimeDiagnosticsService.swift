@@ -46,12 +46,10 @@ let runtimeDiagnosticQuestions: [RuntimeDiagnosticQuestion] = [
 final class RuntimeDiagnosticsService: ObservableObject {
     @Published private(set) var runtimeAnswers: [String: Any] = [:]
     @Published private(set) var cacheExtra: [String: Any] = [:]
-    @Published private(set) var cacheLayout: [String: Any] = [:]
-    @Published private(set) var cacheMapping: [CacheMappingAssessment] = []
-    @Published private(set) var imageIdentity: [String: Any] = [:]
+    @Published private(set) var cacheInfo: [String: Any] = [:]
+    @Published private(set) var cacheStatus = "Not read"
     @Published private(set) var chosenProperties: [String: Any] = [:]
     @Published private(set) var syscfgProperties: [String: Any] = [:]
-    @Published private(set) var activation: [String: Any] = [:]
     @Published private(set) var errorMessage: String?
     @Published private(set) var isLoading = false
 
@@ -62,17 +60,8 @@ final class RuntimeDiagnosticsService: ObservableObject {
         defer { isLoading = false }
 
         var errors: [String] = []
-        let activationAccess = MobileActivationRegionAccess.shared()
         let deviceTree = DeviceTreeAccess.shared()
         let gestalt = MobileGestaltAccess.shared()
-
-
-        // Preserve the existing first-touch ordering: collect the direct MAE
-        // result before asking MobileGestalt for activation-derived answers.
-        activation = activationAccess.regionDiagnostics()
-        imageIdentity = RegionCacheMapping.loadedImage()
-        cacheMapping = RegionCacheMapping.assess(plist: [:], build: MobileGestaltAccess.currentOSBuild(),
-            image: imageIdentity, writeAccess: false, productType: RealDeviceIdentity.productType)
 
         do {
             chosenProperties = try deviceTree.chosenProperties(
@@ -94,19 +83,22 @@ final class RuntimeDiagnosticsService: ObservableObject {
         do {
             if let plist = try gestalt.readCachePlist() as? [String: Any] {
                 cacheExtra = plist["CacheExtra"] as? [String: Any] ?? [:]
-                cacheLayout = JapanRegionCacheLayout.diagnostics(
-                    plist: plist, build: MobileGestaltAccess.currentOSBuild(), productType: RealDeviceIdentity.productType
-                )
-                cacheMapping = RegionCacheMapping.assess(plist: plist, build: MobileGestaltAccess.currentOSBuild(),
-                    image: imageIdentity, writeAccess: false, productType: RealDeviceIdentity.productType)
+                cacheInfo = [
+                    "CacheUUID": plist["CacheUUID"] as? String ?? "<unavailable>",
+                    "CacheVersion": plist["CacheVersion"] as? String ?? "<unavailable>"
+                ]
+                if let data = plist["CacheData"] as? Data { cacheInfo["CacheDataBytes"] = data.count }
+                cacheStatus = "Readable"
             } else {
                 cacheExtra = [:]
-                cacheLayout = [:]
+                cacheInfo = [:]
+                cacheStatus = "Unavailable"
                 errors.append("MobileGestalt cache: expected a dictionary.")
             }
         } catch {
             cacheExtra = [:]
-            cacheLayout = [:]
+            cacheInfo = [:]
+            cacheStatus = "Unavailable"
             errors.append("MobileGestalt cache: \(error.localizedDescription)")
         }
 

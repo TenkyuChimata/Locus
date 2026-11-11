@@ -15,6 +15,7 @@
 #import <errno.h>
 #import <fcntl.h>
 #import <stdint.h>
+#import <string.h>
 #import <sys/stat.h>
 #import <sys/sysctl.h>
 #import <unistd.h>
@@ -24,14 +25,15 @@ typedef CFTypeRef (*MGCopyAnswerFunction)(
     CFDictionaryRef _Nullable options
 );
 
-static NSString * const LocusGestaltFileName =
-    @"com.apple.MobileGestalt.plist";
-static NSString * const LocusGestaltReadDirectory =
+// Fixed system path only. Ancestor symlinks are resolved by the OS; O_NOFOLLOW
+// protects the final file, not each directory in this trusted system path.
+static NSString * const LocusGestaltPath =
     @"/private/var/containers/Shared/SystemGroup/"
-     "systemgroup.com.apple.mobilegestaltcache/Library/Caches";
+     "systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist";
 static NSString * const LocusGestaltLeaseDirectory =
     @"/var/containers/Shared/SystemGroup/"
      "systemgroup.com.apple.mobilegestaltcache/Library/Caches";
+static const off_t LocusGestaltMaxFileSize = 16 * 1024 * 1024;
 
 static NSError *LocusGestaltError(NSInteger code, NSString *message)
 {
@@ -39,25 +41,6 @@ static NSError *LocusGestaltError(NSInteger code, NSString *message)
                                code:code
                            userInfo:@{NSLocalizedDescriptionKey: message}];
 }
-
-static BOOL LocusProbeCacheFile(NSString *path, BOOL writeAccess)
-{
-    int fd = open(path.fileSystemRepresentation, (writeAccess ? O_RDWR : O_RDONLY) |
-                  O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    if (fd < 0) return NO;
-    struct stat state;
-    int failure = 0;
-    if (fstat(fd, &state) != 0) failure = errno;
-    else if (!S_ISREG(state.st_mode) || (writeAccess && state.st_nlink != 1)) failure = EINVAL;
-    close(fd);
-    errno = failure;
-    return failure == 0;
-}
-
-@interface MobileGestaltAccess ()
-@property(nonatomic, strong, nullable) WorseQueryLease *lease;
-@property(nonatomic, copy, nullable) NSString *plistPath;
-@end
 
 @implementation MobileGestaltAccess
 
@@ -86,86 +69,54 @@ static BOOL LocusProbeCacheFile(NSString *path, BOOL writeAccess)
     return [NSString stringWithUTF8String:data.bytes] ?: @"";
 }
 
-- (BOOL)acquireLeaseRequiringWrite:(BOOL)requiringWrite
-                             error:(NSError **)error
+- (WorseQueryLease *)acquireLeaseWithError:(NSError **)error
 {
-    NSString *readPath = [LocusGestaltReadDirectory
-        stringByAppendingPathComponent:LocusGestaltFileName];
-    if (self.lease.isActive && [self.plistPath isEqualToString:readPath]) {
-        if (LocusProbeCacheFile(readPath, requiringWrite)) {
-            if (error) {
-                *error = nil;
-            }
-            return YES;
-        }
-    }
-
-    [self.lease invalidate];
-    self.lease = nil;
-    self.plistPath = nil;
-
-    if (!WorseQueryBridgeAvailable()) {
-        if (error) {
-            *error = LocusGestaltError(2, @"worse_query is unavailable.");
-        }
-        return NO;
-    }
-
-    // Upstream's App Group part query targets the existing cache directory.
-    NSString *leasePath = LocusGestaltLeaseDirectory;
-    NSString *leaseDetail = nil;
-    WorseQueryLease *lease = [WorseQueryLease leaseForPath:leasePath
-                                                 error:&leaseDetail];
-    if (!lease) {
-        if (error) {
-            *error = LocusGestaltError(
-                3,
-                leaseDetail ?: @"Could not acquire the MobileGestalt sandbox extension."
-            );
-        }
-        return NO;
-    }
-
-    if (!LocusProbeCacheFile(readPath, requiringWrite)) {
-        int accessError = errno;
-        [lease invalidate];
-        if (error) {
-            *error = LocusGestaltError(
-                4,
-                [NSString stringWithFormat:
-                    @"The MobileGestalt backing file is not %@ (errno=%d).",
-                    requiringWrite ? @"writable" : @"readable",
-                    accessError]
-            );
-        }
-        return NO;
-    }
-
-    self.lease = lease;
-    self.plistPath = readPath;
-    if (error) {
-        *error = nil;
-    }
-    return YES;
+    NSString *detail = nil;
+    WorseQueryLease *lease = [WorseQueryLease leaseForPath:LocusGestaltLeaseDirectory error:&detail];
+    if (error) *error = lease ? nil : LocusGestaltError(3, detail ?: @"MobileGestalt access denied.");
+    return lease;
 }
 
 - (NSData *)readCacheDataWithError:(NSError **)error
 {
     @synchronized (self) {
-        if (![self acquireLeaseRequiringWrite:NO error:error]) {
-            return nil;
+        WorseQueryLease *lease = [self acquireLeaseWithError:error];
+        if (!lease) return nil;
+        int fd = -1;
+        @try {
+            fd = open(LocusGestaltPath.fileSystemRepresentation,
+                      O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+            if (fd < 0) {
+                if (error) *error = LocusGestaltError(4,
+                    [NSString stringWithFormat:@"Cannot open MobileGestalt: %s (errno=%d).", strerror(errno), errno]);
+                return nil;
+            }
+            struct stat state;
+            if (fstat(fd, &state) != 0) {
+                if (error) *error = LocusGestaltError(5, @"Cannot inspect the MobileGestalt file.");
+                return nil;
+            }
+            if (!S_ISREG(state.st_mode) || state.st_size <= 0 || state.st_size > LocusGestaltMaxFileSize) {
+                if (error) *error = LocusGestaltError(6, @"MobileGestalt must be a nonempty regular file no larger than 16 MiB.");
+                return nil;
+            }
+            NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)state.st_size];
+            NSUInteger offset = 0;
+            while (offset < data.length) {
+                ssize_t count = read(fd, (uint8_t *)data.mutableBytes + offset, data.length - offset);
+                if (count < 0 && errno == EINTR) continue;
+                if (count <= 0) {
+                    if (error) *error = LocusGestaltError(7, @"Could not read the complete MobileGestalt file. Refresh to retry.");
+                    return nil;
+                }
+                offset += (NSUInteger)count;
+            }
+            if (error) *error = nil;
+            return data;
+        } @finally {
+            if (fd >= 0) close(fd);
+            [lease invalidate];
         }
-
-        NSError *readError = nil;
-        NSData *data = [NSData dataWithContentsOfFile:self.plistPath
-                                              options:NSDataReadingMappedIfSafe
-                                                error:&readError];
-        if (!data && error) {
-            *error = readError ?: LocusGestaltError(5, @"Failed to read MobileGestalt.");
-        } else if (error) {
-            *error = nil;
-        }
-        return data ? [NSData dataWithData:data] : nil;
     }
 }
 
@@ -173,7 +124,22 @@ static BOOL LocusProbeCacheFile(NSString *path, BOOL writeAccess)
 {
     @synchronized (self) {
         NSError *error = nil;
-        BOOL writable = [self acquireLeaseRequiringWrite:YES error:&error];
+        WorseQueryLease *lease = [self acquireLeaseWithError:&error];
+        BOOL writable = NO;
+        if (lease) {
+            @try {
+                int fd = open(LocusGestaltPath.fileSystemRepresentation,
+                              O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+                if (fd >= 0) {
+                    struct stat state;
+                    writable = fstat(fd, &state) == 0 && S_ISREG(state.st_mode) && state.st_nlink == 1;
+                    close(fd);
+                }
+                if (!writable) error = LocusGestaltError(4, @"The MobileGestalt file is not writable or is not a single-link regular file.");
+            } @finally {
+                [lease invalidate];
+            }
+        }
         return @{@"writable": @(writable), @"error": error.localizedDescription ?: (id)NSNull.null};
     }
 }
@@ -181,14 +147,19 @@ static BOOL LocusProbeCacheFile(NSString *path, BOOL writeAccess)
 - (BOOL)replaceCacheData:(NSData *)expected withData:(NSData *)replacement error:(NSError **)error
 {
     @synchronized (self) {
-        if (![self acquireLeaseRequiringWrite:YES error:error]) return NO;
-        LocusFileOutcome outcome = LocusFileUnchanged;
-        int rc = LocusReplaceFile(self.plistPath.fileSystemRepresentation, expected.bytes, expected.length,
-                                  replacement.bytes, replacement.length, &outcome);
-        if (rc != 0 && error) *error = LocusGestaltError(50,
-            [NSString stringWithFormat:@"MobileGestalt compare-and-replace failed (errno=%d, outcome=%d: 0=unchanged, 2=rollback verified, 3=recovery required).", errno, outcome]);
-        if (rc == 0 && error) *error = nil;
-        return rc == 0;
+        WorseQueryLease *lease = [self acquireLeaseWithError:error];
+        if (!lease) return NO;
+        @try {
+            LocusFileOutcome outcome = LocusFileUnchanged;
+            int rc = LocusReplaceFile(LocusGestaltPath.fileSystemRepresentation, expected.bytes, expected.length,
+                                      replacement.bytes, replacement.length, &outcome);
+            if (rc != 0 && error) *error = LocusGestaltError(50,
+                [NSString stringWithFormat:@"MobileGestalt compare-and-replace failed (errno=%d, outcome=%d: 0=unchanged, 2=rollback verified, 3=recovery required).", errno, outcome]);
+            if (rc == 0 && error) *error = nil;
+            return rc == 0;
+        } @finally {
+            [lease invalidate];
+        }
     }
 }
 

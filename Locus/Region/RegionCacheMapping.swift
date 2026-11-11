@@ -4,7 +4,7 @@
 // Structural matches are observations, never binary semantic authorization.
 import Foundation
 
-nonisolated enum RegionCacheQuestion: String, CaseIterable, Codable, Sendable {
+nonisolated enum RegionCacheQuestion: String, CaseIterable, Sendable {
     case greenTea = "green-tea", notGreenTea = "not-green-tea", wapi
     var key: String {
         switch self {
@@ -16,12 +16,12 @@ nonisolated enum RegionCacheQuestion: String, CaseIterable, Codable, Sendable {
     var target: Bool { self == .notGreenTea }
 }
 
-enum CacheMappingStatus: String, Codable {
+enum CacheMappingStatus: String {
     case unavailable = "Unavailable", candidate = "Candidate"
     case structurallyValid = "Structurally Valid", binaryVerified = "Binary Verified", writable = "Writable"
 }
 
-nonisolated struct CacheDescriptor: Equatable, Codable {
+nonisolated struct CacheDescriptor: Equatable {
     let section: String
     let offset: Int
     let slot: Int

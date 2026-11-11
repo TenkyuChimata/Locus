@@ -7,7 +7,11 @@ func refuses(_ body: () throws -> Void) {
     do { try body(); fatalError("Expected rejection") } catch {}
 }
 
-let layout = JapanRegionCacheLayout.known1947
+let layout = JapanRegionCacheLayout(size: 0x1947, slotCount: 0x2CF, fields: [
+    .init(question: "green-tea", slot: 0x17E, value: false),
+    .init(question: "not-green-tea", slot: 0x1F9, value: true),
+    .init(question: "wapi", slot: 0x2B5, value: false)
+])
 var original = Data(repeating: 0, count: 0x1947)
 original[42] = 0x8A // an unrelated non-boolean slot must survive
 original[0x0BF0] = 1
@@ -42,27 +46,7 @@ let currentPlist: [String: Any] = [
     "CacheUUID": "00000000-0000-4000-8000-000000000001",
     "CacheVersion": "24B119", "CacheData": current, "CacheExtra": [:] as [String: Any]
 ]
-let observation = JapanRegionCacheLayout.diagnostics(plist: currentPlist, build: "24B119")
-assert(observation["cacheUUIDType"] as? String == "String")
-assert(observation["cacheUUIDValid"] as? Bool == true)
-assert(observation["cacheVersionMatchesBuild"] as? Bool == true)
-assert(observation["candidateSlotCount"] as? Int == 720)
-assert(observation["candidateValidityOffset"] as? Int == 5760)
-assert(observation["candidateValidityCanonical"] as? Bool == true)
-assert(observation["layoutSupported"] as? Bool == false)
 refuses { _ = try JapanRegionCacheLayout.resolve(plist: currentPlist, build: "24B119") }
-current[5760] = 2
-let invalidFlags = JapanRegionCacheLayout.diagnostics(plist: ["CacheData": current], build: "24B119")
-assert(invalidFlags["candidateValidityCanonical"] as? Bool == false)
-for wrong in [Data(), Data(repeating: 0, count: 8)] {
-    let info = JapanRegionCacheLayout.diagnostics(plist: ["CacheData": wrong], build: "")
-    assert(info["candidateSlotCount"] == nil && info["layoutSupported"] as? Bool == false)
-}
-let wrongTypes = JapanRegionCacheLayout.diagnostics(
-    plist: ["CacheUUID": Data(repeating: 1, count: 16), "CacheVersion": 24, "CacheData": "text"], build: "24B119")
-assert(wrongTypes["cacheUUIDType"] as? String == "Data")
-assert(wrongTypes["cacheUUIDValid"] as? Bool == false)
-assert(wrongTypes["cacheVersionMatchesBuild"] as? Bool == false)
 
 let profile = JapanRegionProfile.verified(for: "iPhone17,3")!
 assert(profile.regulatoryModel == "A3286")

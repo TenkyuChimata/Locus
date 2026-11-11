@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Copyright (C) 2026 huamidev
 // Loaded-image collection adapted from GestaltX (see notices).
-// Locus uses checked Mach VM reads, segment bounds and separate evidence levels.
+// Checked snapshots for the independent mutation gates.
 #import "MobileGestaltImage.h"
 #import <TargetConditionals.h>
 #import <mach/mach.h>
@@ -135,11 +135,10 @@ static NSDictionary *LocusSnapshotImage(NSString *path, BOOL includeSections)
     }
     if (failure || offset != commands.length || uuidCount != 1)
         return @{@"error": failure ?: @"Missing/duplicate LC_UUID or unused command bytes."};
-    return @{@"binaryUUID": uuid, @"path": path, @"sections": sections,
+    return @{@"binaryUUID": uuid, @"sections": sections,
              @"cpuType": @((uint32_t)header.cputype), @"cpuSubtype": @((uint32_t)header.cpusubtype),
-             @"source": @"current process loaded image", @"slide": @(slide),
-             @"pointerRepresentation": @"dyld-resolved key addresses",
-             @"pointerComparison": @"Exact key-address comparison; unknown PAC/tag/fixup forms rejected. No PAC authentication performed."};
+             @"source": @"current process loaded image",
+             @"pointerRepresentation": @"dyld-resolved key addresses"};
 }
 
 NSDictionary<NSString *, id> *LocusLoadedImageIdentity(NSString *path)
