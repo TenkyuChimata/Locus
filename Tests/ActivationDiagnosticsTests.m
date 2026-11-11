@@ -224,6 +224,21 @@ NSArray<NSString *> *WorseQueryListImmediateChildren(NSString *path, uint64_t li
     return lease;
 }
 - (void)invalidate { if (_active) { _active = NO; invalidated++; } }
++ (instancetype)leaseForPath:(NSString *)path
+                      error:(NSString **)error
+                      audit:(NSMutableDictionary<NSString *, id> *)audit
+{
+    NSCAssert(audit == nil,
+              @"ActivationDiagnosticsTests must not exercise audited leases");
+    return [self leaseForPath:path error:error];
+}
+
+- (void)invalidateWithAudit:(NSMutableDictionary<NSString *, id> *)audit
+{
+    NSCAssert(audit == nil,
+              @"ActivationDiagnosticsTests must not exercise audited leases");
+    [self invalidate];
+}
 @end
 
 static NSDictionary *Probe(void)
