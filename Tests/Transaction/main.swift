@@ -8,13 +8,64 @@ MainActor.assumeIsolated {
     @MainActor func status(_ module: RegionModule) -> RegionModuleStatus {
         service.modules.first { $0.module == module }!
     }
+    @MainActor func diagnostic(_ title: String) -> String {
+        service.activationDiagnostics.first { $0.title == title }!.value
+    }
     service.refresh()
+    assert(!Fixture.events.contains("diagnoseMA"))
+    assert(service.activationDiagnostics.allSatisfy { $0.value == "Not Tested" })
     assert(status(.regionCode).canApply && status(.regionInfo).canApply && status(.regulatoryModel).canApply)
     assert(status(.intelligence).canApply)
     assert(!status(.greenTea).canApply && !status(.wapi).canApply && !status(.mobileActivation).canApply && !status(.fullJapan).canApply)
     service.applyJapanRegion()
     assert(service.errorMessage != nil && !Fixture.events.contains("writeMG") && !Fixture.events.contains("writeMA"))
-    assert(Fixture.events.contains("diagnoseMA")) // Composite preflight is explicit.
+    assert(!Fixture.events.contains("diagnoseMA")) // A blocked action does not refresh research.
+    service.refreshResearch()
+    assert(Fixture.events.filter { $0 == "diagnoseMA" }.count == 1)
+    assert(diagnostic("SystemGroup Resolution") == "Failed" && diagnostic("Resolver Status").contains("55"))
+    assert(diagnostic("Container Query").contains("POSIX=1"))
+    for title in ["Backing Read", "Schema Valid", "Write Access", "Write Error"] {
+        assert(diagnostic(title) == "Not Tested")
+    }
+    assert(diagnostic("MobileActivation API") == "Succeeded")
+    assert(diagnostic("CountryCode") == "JP" && diagnostic("RegionInfo") == "J/A" && diagnostic("SoftwareBehaviors") == "25")
+    assert(diagnostic("Binary Gate") == "Unreviewed (writes blocked)" && diagnostic("Mutation Schema") == "Blocked")
+    let successObservation = service.activationDiagnostics.map(\.value)
+    Fixture.activationDiagnostics["effectiveCallSucceeded"] = false
+    Fixture.activationDiagnostics["effectiveStage"] = "api-error"
+    Fixture.activationDiagnostics["effectiveErrorDomain"] = "com.apple.MobileActivation.ErrorDomain"
+    Fixture.activationDiagnostics["effectiveErrorCode"] = -28
+    Fixture.activationDiagnostics["effectiveErrorDescription"] = "Device region is unsupported."
+    service.refresh()
+    assert(service.activationDiagnostics.map(\.value) == successObservation) // Cached until explicit refresh.
+    service.refreshResearch()
+    assert(diagnostic("MobileActivation API") == "Failed" && diagnostic("API Stage") == "api-error")
+    assert(diagnostic("API Error").contains("com.apple.MobileActivation.ErrorDomain / -28 / Device region is unsupported."))
+    assert(!service.activationDiagnostics.contains { $0.title == "CountryCode" })
+    Fixture.activationDiagnostics["effectiveCallSucceeded"] = true
+    service.refreshResearch()
+    assert(diagnostic("MobileActivation API") == "Succeeded with error" && diagnostic("CountryCode") == "JP")
+    Fixture.activationDiagnostics["effectiveCallSucceeded"] = false
+    Fixture.activationDiagnostics["backingPathState"] = ["state": "stat-failed; existence unknown", "domain": "NSPOSIXErrorDomain", "code": 13]
+    service.refreshResearch()
+    assert(diagnostic("Backing File State").contains("existence unknown") && diagnostic("Backing File State").contains(":13"))
+    Fixture.activationDiagnostics["backingPathState"] = ["state": "stat-failed; existence unknown", "domain": "NSPOSIXErrorDomain", "code": 2]
+    service.refreshResearch()
+    assert(diagnostic("Backing File State") == "Not found at candidate path (NSPOSIXErrorDomain:2)")
+    Fixture.activationDiagnostics["backingReadSucceeded"] = false
+    Fixture.activationDiagnostics["backingStage"] = "plist-parse"
+    Fixture.activationDiagnostics["backingReadError"] = "Malformed plist"
+    service.refreshResearch()
+    assert(diagnostic("Backing Read") == "Failed" && diagnostic("Backing Stage") == "plist-parse")
+    assert(diagnostic("Read Error") == "Malformed plist" && diagnostic("Schema Valid") == "Not Tested")
+    Fixture.activationDiagnostics["backingReadSucceeded"] = true
+    Fixture.activationDiagnostics["backingSchemaValid"] = false
+    Fixture.activationDiagnostics["backingWriteAccessAvailable"] = false
+    Fixture.activationDiagnostics["backingWriteAccessError"] = "errno=13"
+    service.refreshResearch()
+    assert(diagnostic("Backing Read") == "Succeeded" && diagnostic("Schema Valid") == "Unsupported")
+    assert(diagnostic("Write Access") == "Failed (writes unavailable)" && diagnostic("Write Error") == "errno=13")
+    assert(!status(.mobileActivation).canApply && !status(.mobileActivation).canRestore && !status(.fullJapan).canApply)
     Fixture.events = []
     service.apply(.regionCode)
     assert(service.errorMessage == nil && service.operationResult != nil)

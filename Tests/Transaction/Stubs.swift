@@ -13,6 +13,15 @@ enum Fixture {
     static var writable = true
     static var denyActivation = true
     static var events: [String] = []
+    static var activationDiagnostics: [String: Any] = [
+        "mutationSchemaSupported": false, "mutationSchemaError": "Identity / binary semantics unverified",
+        "resolverSucceeded": false, "resolverStatus": 55,
+        "discovery": ["source": "unresolved", "identityQuery": ["status": "iteration-failed", "queryErrorPOSIXCode": 1]],
+        "backingStage": "systemgroup-discovery", "backingPathState": ["state": "not-observed"],
+        "backingReadSucceeded": NSNull(), "backingSchemaValid": NSNull(), "backingWriteAccessAvailable": NSNull(),
+        "binarySupported": false, "effectiveCallSucceeded": true, "effectiveStage": "complete",
+        "effectiveCountryCode": "JP", "effectiveRegionInfo": "J/A", "effectiveSoftwareBehaviors": "25"
+    ]
     static let baseline: Data = try! PropertyListSerialization.data(fromPropertyList: [
         "CacheExtra": [JapanRegionMutation.regionCodeKey: "CH", JapanRegionMutation.regionInfoKey: "CH/A",
                        JapanRegionMutation.regulatoryModelKey: "A9999", "hardware": "real"],
@@ -40,8 +49,7 @@ final class MobileActivationRegionAccess {
     static func shared() -> MobileActivationRegionAccess { instance }
     func regionDiagnostics() -> [String: Any] {
         Fixture.events.append("diagnoseMA")
-        return ["mutationSchemaSupported": false, "mutationSchemaError": "Identity / binary semantics unverified",
-         "backingReadSucceeded": false]
+        return Fixture.activationDiagnostics
     }
     func readRegionData() throws -> Data {
         Fixture.events.append("readMA")

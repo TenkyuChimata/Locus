@@ -103,6 +103,13 @@ struct RegionIdentityView: View {
                     value("Runtime", status.runtime)
                     value("Original Backup", status.originalAvailable ? "Available" : "Not yet saved")
                     Text(status.detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    if module == .mobileActivation {
+                        DisclosureGroup("Access Diagnostics") {
+                            ForEach(service.activationDiagnostics) { row in
+                                value(row.title, row.value)
+                            }
+                        }
+                    }
                 }
             }
         } else { Text(module.title).foregroundStyle(.secondary) }

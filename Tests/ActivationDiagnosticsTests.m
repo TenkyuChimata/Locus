@@ -43,6 +43,9 @@ typedef NS_ENUM(NSUInteger, LeaseFault) {
 };
 static LeaseFault leaseFault;
 static BOOL failFramework, failSymbol, failAPI;
+static BOOL emptyAPI, wrongAPIType, apiDictionaryWithError, failKeySymbol, denyWriteOpen;
+static NSUInteger apiCalls;
+static CFErrorRef simulatedAPIError;
 static NSUInteger metadataLeaseAttempts, metadataLeaseDenials;
 static NSUInteger regionLeaseAttempts, regionLeaseDenials;
 static NSUInteger resolverCalls, acquired, invalidated;
@@ -65,11 +68,15 @@ static char *Resolve(uint64_t argument, const char *identifier, uint64_t *status
 }
 static CFDictionaryRef CopyRegion(CFErrorRef *error)
 {
-    if (failAPI) {
-        *error = CFErrorCreate(NULL, CFSTR("test.mobileactivation"), 42,
+    apiCalls++;
+    if (failAPI || apiDictionaryWithError) {
+        if (!simulatedAPIError) simulatedAPIError = CFErrorCreate(NULL, CFSTR("test.mobileactivation"), 42,
             (__bridge CFDictionaryRef)@{NSLocalizedDescriptionKey: @"Device region is unsupported."});
-        return NULL;
+        *error = simulatedAPIError; // Borrowed for the duration of the test.
+        if (failAPI) return NULL;
     }
+    if (emptyAPI) return NULL;
+    if (wrongAPIType) return (CFDictionaryRef)CFBridgingRetain(@[@"unexpected array"]);
     return CFBridgingRetain(@{countryKey: @"CN", regionKey: @"CH/A", behaviorKey: @"321"});
 }
 static const char *DescribeStatus(uint64_t status)
@@ -129,7 +136,7 @@ static void *TestSymbol(void *handle, const char *name)
     if (!strcmp(name, "MAECopyDeviceRegionInfoWithError")) return (void *)CopyRegion;
     if (!strcmp(name, "kMADeviceRegionCountryCode")) return &countryKey;
     if (!strcmp(name, "kMADeviceRegionRegionInfo")) return &regionKey;
-    if (!strcmp(name, "kMADeviceRegionSoftwareBehaviors")) return &behaviorKey;
+    if (!strcmp(name, "kMADeviceRegionSoftwareBehaviors")) return failKeySymbol ? NULL : &behaviorKey;
     return NULL;
 }
 static int TestClose(void *handle) { assert(handle); librariesClosed++; return 0; }
@@ -146,6 +153,8 @@ static int TestFollowStat(const char *path, struct stat *state)
 }
 static int TestFileOpen(const char *path, int flags, ...)
 {
+    assert(!(flags & (O_CREAT | O_TRUNC))); // Diagnostics never creates/truncates targets.
+    if (denyWriteOpen && (flags & O_ACCMODE) == O_RDWR) { errno = EACCES; return -1; }
     NSString *actual = [NSString stringWithUTF8String:path];
     if (denyHiddenOpen && [actual.lastPathComponent isEqual:LocusMetadataHidden]) {
         errno = EPERM;
@@ -230,8 +239,10 @@ static NSDictionary *Probe(void)
 {
     metadataLeaseAttempts = metadataLeaseDenials = regionLeaseAttempts = regionLeaseDenials = 0;
     NSUInteger before = resolverCalls;
+    NSUInteger callsBefore = apiCalls;
     NSDictionary *result = [MobileActivationRegionAccess.shared regionDiagnostics];
     assert(resolverCalls == before + 1); // status and direct read use one attempt
+    assert(apiCalls == callsBefore + (failFramework || failSymbol || failKeySymbol ? 0 : 1));
     assert(acquired == invalidated);
     assert(queriesCreated == queriesFreed && openDescriptors == 0);
     assert(librariesOpened == librariesClosed);
@@ -351,6 +362,20 @@ int main(void)
         candidates = @[];
         result = Probe();
         ExpectStage(result, @"backingStage", @"systemgroup-discovery");
+        assert(result[@"backingReadSucceeded"] == NSNull.null);
+        assert(result[@"backingSchemaValid"] == NSNull.null);
+        assert(result[@"backingWriteAccessAvailable"] == NSNull.null);
+        assert([result[@"effectiveCountryCode"] isEqual:@"CN"]);
+        assert([result[@"effectiveRegionInfo"] isEqual:@"CH/A"]);
+        assert([result[@"effectiveSoftwareBehaviors"] isEqual:@"321"]);
+        emptyAPI = YES;
+        ExpectStage(Probe(), @"effectiveStage", @"api-empty-result");
+        emptyAPI = NO; wrongAPIType = YES;
+        ExpectStage(Probe(), @"effectiveStage", @"api-result-type");
+        wrongAPIType = NO; apiDictionaryWithError = YES;
+        result = Probe();
+        assert([result[@"effectiveCallSucceeded"] boolValue] && [result[@"effectiveErrorCode"] intValue] == 42);
+        apiDictionaryWithError = NO;
 
         candidates = @[temporary];
         leaseFault = LeaseFaultAll;
@@ -438,14 +463,20 @@ int main(void)
         result = Probe();
         ExpectStage(result, @"backingStage", @"resolver-identity");
         assert(metadataLeaseAttempts == 0 && regionLeaseAttempts == 0);
-        assert(![result[@"backingReadSucceeded"] boolValue]); // resolver path outside SystemGroup is refused
+        assert(result[@"backingReadSucceeded"] == NSNull.null); // resolver path outside SystemGroup is refused
+        assert(![result[@"resolverSucceeded"] boolValue]);
         normalPath = nil;
         LocusCachedActivationSystemGroupPath = temporary; // earlier synthetic metadata identity match
         NSString *backing = [directory stringByAppendingPathComponent:@"region_info.plist"];
         WritePlist(@[@"wrong root"], backing);
         result = Probe();
-        ExpectStage(result, @"backingStage", @"plist-parse");
+        ExpectStage(result, @"backingStage", @"plist-root-type");
         assert([result[@"backingErrorDetails"][@"errors"][0][@"code"] intValue] == 23);
+        assert(result[@"backingSchemaValid"] == NSNull.null);
+        assert([[NSData dataWithBytes:"bplist00" length:8] writeToFile:backing atomically:NO]); // Truncated binary plist.
+        result = Probe();
+        ExpectStage(result, @"backingStage", @"plist-parse");
+        assert([result[@"backingReadSucceeded"] isEqual:@NO]);
 
         WritePlist(@{@"CountryCode": @"CN", @"RegionInfo": @"CH/A", @"SoftwareBehaviors": @321}, backing);
         result = Probe();
@@ -461,6 +492,14 @@ int main(void)
         assert(![result[@"mutationSchemaSupported"] boolValue]); // schema shape alone is not binary verification
         ExpectStage(result, @"effectiveStage", @"complete");
         assert([original isEqual:[NSData dataWithContentsOfFile:backing]]);
+        denyWriteOpen = YES;
+        result = Probe();
+        assert([result[@"backingReadSucceeded"] boolValue] && [result[@"backingSchemaValid"] boolValue]);
+        assert([result[@"backingWriteAccessAvailable"] isEqual:@NO]);
+        assert([result[@"backingWriteAccessError"] containsString:@"errno=13"]);
+        assert(![result[@"mutationSchemaSupported"] boolValue]);
+        assert([original isEqual:[NSData dataWithContentsOfFile:backing]]);
+        denyWriteOpen = NO;
 
         // Identifier-named container omitted from the inode results. Only a
         // matching metadata identifier may recover it, including /var-only reads.
@@ -499,7 +538,14 @@ int main(void)
         result = Probe();
         ExpectStage(result, @"backingStage", @"complete");
         ExpectStage(result, @"effectiveStage", @"framework-load");
+        assert(result[@"binarySupported"] == NSNull.null);
         failFramework = NO;
+        failKeySymbol = YES;
+        result = Probe();
+        ExpectStage(result, @"effectiveStage", @"symbol-resolution");
+        assert([result[@"effectiveErrorDescription"] containsString:@"kMADeviceRegionSoftwareBehaviors"]);
+        failKeySymbol = NO;
+        CFRelease(simulatedAPIError);
         assert([files removeItemAtPath:temporary error:NULL]);
         method_exchangeImplementations(read, testRead);
         puts("PASS: activation phase/error separation, redaction, read-only schema checks and lease cleanup (simulated APIs)");

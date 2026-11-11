@@ -464,7 +464,7 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
     NSString *normalPath = LocusResolveSystemGroupNormally(&status, &detail);
     diagnostics[@"resolverSucceeded"] = @(normalPath.length > 0);
     diagnostics[@"resolverStatus"] = status ?: NSNull.null;
-    diagnostics[@"resolverDetail"] = detail ?: NSNull.null;
+    diagnostics[@"resolverDetail"] = detail ? LocusSafeDiagnosticText(detail) : (id)NSNull.null;
     // Ask this loaded ContainerManager for its enum label when available.
     // Never interpret its private status as errno or an MAE NSError code.
     NSString *statusName = nil;
@@ -493,6 +493,8 @@ static NSString * _Nullable LocusResolveSystemGroupWithFallback(
     if (normalPath.length > 0) {
         if (!LocusIsSystemGroupCandidate(normalPath) || status.unsignedLongLongValue != 0) {
             NSError *identityError = LocusActivationError(12, @"Resolver path/status failed SystemGroup identity scope validation.");
+            diagnostics[@"resolverSucceeded"] = @NO;
+            diagnostics[@"resolverDetail"] = identityError.localizedDescription;
             LocusRecordFailure(diagnostics, @"resolver-identity", identityError);
             if (error) *error = identityError;
             return nil;
@@ -856,17 +858,18 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
         WorseQueryLease *lease = LocusAcquireRegionLease(&readPath, &leaseError, result);
         result[@"resolvedBackingPath"] = readPath ? LocusSafeDiagnosticText(readPath) : (id)NSNull.null;
         result[@"backingPathState"] = @{@"state": @"not-observed"};
-        result[@"backingReadSucceeded"] = @NO;
+        // NSNull means this check was not reached, not a negative observation.
+        result[@"backingReadSucceeded"] = NSNull.null;
         result[@"backingReadError"] = leaseError
             ? LocusSafeDiagnosticText(leaseError.localizedDescription) : (id)NSNull.null;
         result[@"backingCountryCode"] = NSNull.null;
         result[@"backingRegionInfo"] = NSNull.null;
         result[@"backingSoftwareBehaviors"] = NSNull.null;
         result[@"mutationSchemaSupported"] = @NO;
-        result[@"backingSchemaValid"] = @NO;
-        result[@"backingWriteAccessAvailable"] = @NO;
-        result[@"backingWriteAccessError"] = @"Backing file has not been directly read and identified.";
-        result[@"binarySupported"] = @NO;
+        result[@"backingSchemaValid"] = NSNull.null;
+        result[@"backingWriteAccessAvailable"] = NSNull.null;
+        result[@"backingWriteAccessError"] = NSNull.null;
+        result[@"binarySupported"] = NSNull.null;
         result[@"binaryUUID"] = NSNull.null;
         result[@"storagePathProvenance"] = @"Inherited relative-path hypothesis; requires current framework/daemon review. No file is created.";
         result[@"metadataDenialMeaning"] = @"Denied metadata reads do not establish region_info.plist absence or unreadability. File access requires an independently identified container.";
@@ -877,6 +880,7 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
         if (lease) {
             @try {
                 result[@"backingPathState"] = LocusPathState(readPath);
+                result[@"backingReadSucceeded"] = @NO;
                 NSError *readError = nil;
                 NSData *data = [NSData dataWithContentsOfFile:readPath
                                                       options:NSDataReadingMappedIfSafe
@@ -918,7 +922,8 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
                     result[@"backingWriteAccessError"] = writable ? (id)NSNull.null :
                         [NSString stringWithFormat:@"Existing region file is not writable as a regular single-link inode (errno=%d).", writeError];
                 } else {
-                    NSString *stage = bytesRead ? @"plist-parse" : @"file-read";
+                    BOOL unsupportedRoot = [readError.domain isEqual:@"io.github.tenkyuchimata.locus.mobileactivation"] && readError.code == 23;
+                    NSString *stage = bytesRead ? (unsupportedRoot ? @"plist-root-type" : @"plist-parse") : @"file-read";
                     readError = readError ?: LocusActivationError(bytesRead ? 23 : 20,
                         bytesRead ? @"Could not parse the backing plist." : @"Could not read the backing plist.");
                     LocusRecordFailure(result, stage, readError);
@@ -942,17 +947,17 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
         void *handle = dlopen(LocusActivationFramework.fileSystemRepresentation,
                               RTLD_LAZY | RTLD_LOCAL);
         if (!handle) {
-            result[@"effectiveErrorDescription"] = [NSString stringWithFormat:
-                @"Could not load MobileActivation: %s", dlerror() ?: "unknown error"];
+            result[@"effectiveErrorDescription"] = LocusSafeDiagnosticText([NSString stringWithFormat:
+                @"Could not load MobileActivation: %s", dlerror() ?: "unknown error"]);
             return [result copy];
         }
 
         result[@"binaryUUID"] = LocusLoadedImageIdentity(LocusActivationFramework)[@"binaryUUID"] ?: NSNull.null;
         result[@"binarySupported"] = @(LocusActivationBinaryReviewed());
-        result[@"mutationSchemaSupported"] = @([result[@"backingSchemaValid"] boolValue] &&
-            [result[@"binarySupported"] boolValue] && [result[@"backingWriteAccessAvailable"] boolValue]);
-        if ([result[@"binarySupported"] boolValue] && [result[@"backingSchemaValid"] boolValue] &&
-            ![result[@"backingWriteAccessAvailable"] boolValue]) result[@"mutationSchemaError"] = result[@"backingWriteAccessError"];
+        result[@"mutationSchemaSupported"] = @([result[@"backingSchemaValid"] isEqual:@YES] &&
+            [result[@"binarySupported"] isEqual:@YES] && [result[@"backingWriteAccessAvailable"] isEqual:@YES]);
+        if ([result[@"binarySupported"] isEqual:@YES] && [result[@"backingSchemaValid"] isEqual:@YES] &&
+            [result[@"backingWriteAccessAvailable"] isEqual:@NO]) result[@"mutationSchemaError"] = result[@"backingWriteAccessError"];
         if ([result[@"mutationSchemaSupported"] boolValue]) result[@"mutationSchemaError"] = NSNull.null;
 
         LocusCopyDeviceRegionInfo copyRegion =
@@ -963,10 +968,14 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
             (NSString * const *)dlsym(handle, "kMADeviceRegionRegionInfo");
         NSString * const *behaviorKey =
             (NSString * const *)dlsym(handle, "kMADeviceRegionSoftwareBehaviors");
-        if (!copyRegion || !countryKey || !*countryKey ||
-            !regionKey || !*regionKey || !behaviorKey || !*behaviorKey) {
-            result[@"effectiveErrorDescription"] =
-                @"Required MobileActivation device-region symbols are unavailable.";
+        NSMutableArray<NSString *> *missing = [NSMutableArray new];
+        if (!copyRegion) [missing addObject:@"MAECopyDeviceRegionInfoWithError"];
+        if (!countryKey || ![*countryKey isKindOfClass:NSString.class]) [missing addObject:@"kMADeviceRegionCountryCode"];
+        if (!regionKey || ![*regionKey isKindOfClass:NSString.class]) [missing addObject:@"kMADeviceRegionRegionInfo"];
+        if (!behaviorKey || ![*behaviorKey isKindOfClass:NSString.class]) [missing addObject:@"kMADeviceRegionSoftwareBehaviors"];
+        if (missing.count) {
+            result[@"effectiveErrorDescription"] = [@"Missing or invalid symbols: " stringByAppendingString:
+                [missing componentsJoinedByString:@", "]];
             result[@"effectiveStage"] = @"symbol-resolution";
             dlclose(handle);
             return [result copy];
@@ -975,7 +984,8 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
         CFErrorRef apiErrorRef = NULL;
         CFDictionaryRef dictionaryRef = copyRegion(&apiErrorRef);
         result[@"effectiveStage"] = @"api-call";
-        NSError *apiError = apiErrorRef ? (__bridge NSError *)apiErrorRef : nil;
+        BOOL validError = apiErrorRef && CFGetTypeID(apiErrorRef) == CFErrorGetTypeID();
+        NSError *apiError = validError ? (__bridge NSError *)apiErrorRef : nil;
         if (dictionaryRef && CFGetTypeID(dictionaryRef) == CFDictionaryGetTypeID()) {
             NSDictionary *dictionary = (__bridge NSDictionary *)dictionaryRef;
             result[@"effectiveCallSucceeded"] = @YES;
@@ -990,7 +1000,11 @@ static BOOL LocusValidateRegionSchema(NSDictionary *region, NSError **error)
             result[@"effectiveErrorDescription"] =
                 LocusSafeDiagnosticText(apiError.localizedDescription);
             result[@"effectiveStage"] = @"api-error";
+        } else if (apiErrorRef) {
+            result[@"effectiveStage"] = @"api-error-type";
+            result[@"effectiveErrorDescription"] = @"API returned a non-CFError error object.";
         } else if (!dictionaryRef) {
+            result[@"effectiveStage"] = @"api-empty-result";
             result[@"effectiveErrorDescription"] = @"API returned NULL without an error.";
         } else if (CFGetTypeID(dictionaryRef) != CFDictionaryGetTypeID()) {
             result[@"effectiveStage"] = @"api-result-type";

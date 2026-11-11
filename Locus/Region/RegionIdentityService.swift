@@ -21,6 +21,12 @@ struct RegionModuleStatus: Identifiable {
     let canRestore: Bool
 }
 
+struct RegionAccessDiagnosticRow: Identifiable {
+    let title: String
+    let value: String
+    var id: String { title }
+}
+
 final class NativeRegionFileAccess: RegionFileAccess {
     func read(_ file: RegionFile) throws -> Data {
         switch file {
@@ -60,6 +66,92 @@ final class RegionIdentityService: ObservableObject {
         "mutationSchemaError": "MobileActivation research has not been refreshed. Use its independent research refresh."]
     private var activationObservedAt: Date?
 
+    // Present the existing read-only observation; evaluating rows performs no I/O.
+    var activationDiagnostics: [RegionAccessDiagnosticRow] {
+        let info = activationInfo
+        let observed = activationObservedAt != nil
+        let discovery = info["discovery"] as? [String: Any] ?? [:]
+        func text(_ value: Any?, fallback: String = "Not Tested") -> String {
+            guard let value, !(value is NSNull) else { return fallback }
+            return String(describing: value)
+        }
+        func flag(_ key: String, yes: String = "Succeeded", no: String = "Failed") -> String {
+            guard observed, let value = info[key] as? NSNumber else { return "Not Tested" }
+            return value.boolValue ? yes : no
+        }
+        func errorDetails(_ value: Any?) -> String? {
+            guard let details = value as? [String: Any], let errors = details["errors"] as? [[String: Any]] else { return nil }
+            return ([text(details["stage"])] + errors.map {
+                "\(text($0["domain"])):\(text($0["code"]))"
+            }).joined(separator: " → ")
+        }
+        func errorText(_ details: Any?, _ message: Any?) -> String {
+            let parts = [errorDetails(details), text(message, fallback: "")].compactMap { $0 }.filter { !$0.isEmpty }
+            return parts.isEmpty ? (observed ? "None" : "Not Tested") : parts.joined(separator: " — ")
+        }
+        func pathState(_ value: Any?) -> String {
+            guard let path = value as? [String: Any], let state = path["state"] as? String,
+                  state != "not-observed" else { return "Not Tested" }
+            // ENOENT applies to this candidate path; it does not disprove other locations.
+            let label = path["code"] as? Int == 2 ? "Not found at candidate path" : state
+            return label + (path["code"].map { " (\(text(path["domain"])):\($0))" } ?? "")
+        }
+        func row(_ title: String, _ value: String) -> RegionAccessDiagnosticRow { .init(title: title, value: value) }
+        let source = discovery["source"] as? String
+        let resolverCode = text(info["resolverStatus"], fallback: "")
+        let resolverName = text(info["resolverStatusName"], fallback: "")
+        let resolver = [flag("resolverSucceeded"), resolverCode, resolverName].filter { !$0.isEmpty }.joined(separator: " / ")
+        var rows = [
+            row("SystemGroup Resolution", observed ? (source != nil && source != "unresolved" ? "Succeeded" : "Failed") : "Not Tested"),
+            row("Resolver Status", resolver),
+            row("Resolver Detail", text(info["resolverDetail"], fallback: observed ? "None" : "Not Tested")),
+            row("Discovery Source", text(source)),
+            row("Backing File State", pathState(info["backingPathState"])),
+            row("Backing Stage", text(info["backingStage"]))
+        ]
+        if info["backingStage"] as? String == "region-lease" {
+            rows.append(row("Lease Target State", pathState(info["regionLeaseTargetState"])))
+        }
+        if let query = discovery["identityQuery"] as? [String: Any] {
+            let codes = [query["queryErrorType"].map { "type=\($0)" }, query["queryErrorName"] as? String,
+                         query["queryErrorPOSIXCode"].map { "POSIX=\($0)" }].compactMap { $0 }
+            rows.append(row("Container Query", ([text(query["status"])] + codes).joined(separator: " / ")))
+        }
+        if let failure = discovery["lastMetadataFailure"] {
+            rows.append(row("Metadata Failure", errorText(failure,
+                (failure as? [String: Any])?["stage"] as? String == "metadata-lease" ? discovery["lastMetadataLeaseDetail"] : nil)))
+        }
+        if let readFailure = discovery["lastMetadataReadFailure"] {
+            rows.append(row("Metadata Read Error", errorText(readFailure, nil)))
+        }
+        rows += [
+            row("Backing Read", flag("backingReadSucceeded")),
+            row("Read Error", errorText(info["backingErrorDetails"], observed ? info["backingReadError"] : nil)),
+            row("Schema Valid", flag("backingSchemaValid", yes: "Valid", no: "Unsupported")),
+            row("Write Access", flag("backingWriteAccessAvailable", yes: "Available (open only)", no: "Failed (writes unavailable)")),
+            row("Write Error", info["backingWriteAccessAvailable"] is NSNumber ? errorText(nil, info["backingWriteAccessError"]) : "Not Tested")
+        ]
+        let apiDescription = text(info["effectiveErrorDescription"], fallback: "")
+        let apiError = [text(info["effectiveErrorDomain"], fallback: ""), text(info["effectiveErrorCode"], fallback: ""),
+                        apiDescription].filter { !$0.isEmpty }.joined(separator: " / ")
+        rows += [
+            row("MobileActivation API", flag("effectiveCallSucceeded", yes: apiError.isEmpty ? "Succeeded" : "Succeeded with error")),
+            row("API Stage", text(info["effectiveStage"])),
+            row("API Error", apiError.isEmpty ? (observed ? "None" : "Not Tested") : apiError)
+        ]
+        if (info["effectiveCallSucceeded"] as? NSNumber)?.boolValue == true {
+            rows += [row("CountryCode", text(info["effectiveCountryCode"], fallback: "<nil>")),
+                     row("RegionInfo", text(info["effectiveRegionInfo"], fallback: "<nil>")),
+                     row("SoftwareBehaviors", text(info["effectiveSoftwareBehaviors"], fallback: "<nil>"))]
+        }
+        rows += [
+            row("Binary Gate", flag("binarySupported", yes: "Reviewed", no: "Unreviewed (writes blocked)")),
+            row("Mutation Schema", flag("mutationSchemaSupported", yes: "Supported", no: "Blocked")),
+            row("Mutation Error", observed ? errorText(info["mutationSchemaErrorDetails"], info["mutationSchemaError"]) : "Not Tested")
+        ]
+        return rows
+    }
+
     init(backupRoot: URL? = nil, access: RegionFileAccess? = nil,
          deviceContext: (() -> (productType: String, build: String))? = nil, deviceID: String? = nil) {
         #if os(iOS)
@@ -86,7 +178,7 @@ final class RegionIdentityService: ObservableObject {
         return .init(root: root, access: fileAccess, productType: context.productType, build: context.build, deviceID: deviceID)
     }
 
-    func refresh(includeActivation: Bool = false) {
+    func refresh() {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
@@ -94,13 +186,8 @@ final class RegionIdentityService: ObservableObject {
         build = context.build
         productType = context.productType
         var errors: [String] = []
-        // Independent identity/capability actions never require an activation
-        // query or container scan. Explicit research/full actions refresh it
-        // before making the MG queries in this observation.
-        if includeActivation {
-            activationInfo = activation.regionDiagnostics()
-            activationObservedAt = Date()
-        }
+        // Reuse the last explicit research observation. Ordinary refresh and
+        // MobileGestalt actions never query/scan MobileActivation containers.
         var raw: Data?
         var plist: [String: Any] = [:]
         do {
@@ -204,10 +291,19 @@ final class RegionIdentityService: ObservableObject {
     @discardableResult
     func prepare(_ module: RegionModule, restore: Bool = false) -> Bool {
         guard !isBusy, prepared == nil else { return false }
-        refresh(includeActivation: module == .mobileActivation || module == .fullJapan)
+        refresh()
         guard let status = modules.first(where: { $0.module == module }), restore ? status.canRestore : status.canApply else {
             errorMessage = "\(module.title): no supported layout, writable path or compatible backup."
             return false
+        }
+        // Retain a fresh mutation preflight if a future reviewed binary makes
+        // this action available. It does not update the research display.
+        if module == .mobileActivation || module == .fullJapan {
+            let preflight = activation.regionDiagnostics()
+            guard (preflight["mutationSchemaSupported"] as? NSNumber)?.boolValue == true else {
+                errorMessage = display(preflight["mutationSchemaError"])
+                return false
+            }
         }
         isBusy = true; errorMessage = nil; operationResult = nil; comparisons = []
         var failure: String?
@@ -227,7 +323,7 @@ final class RegionIdentityService: ObservableObject {
     func confirmPrepared() {
         guard !isBusy, let journal = prepared else { return }
         prepared = nil
-        run(refreshActivation: journal.module == .mobileActivation || journal.module == .fullJapan) {
+        run {
             try coordinator().commitPrepared(journal.id)
         }
     }
@@ -253,16 +349,21 @@ final class RegionIdentityService: ObservableObject {
     }
 
     func recover() { run { try coordinator().recoverPending() } }
-    func refreshResearch() { refresh(includeActivation: true) }
+    func refreshResearch() {
+        guard !isBusy else { return }
+        activationInfo = activation.regionDiagnostics()
+        activationObservedAt = Date()
+        refresh()
+    }
     func applyJapanRegion() { apply(.fullJapan) }
 
-    private func run(refreshActivation: Bool = false, _ operation: () throws -> String) {
+    private func run(_ operation: () throws -> String) {
         guard !isBusy else { return }
         isBusy = true; errorMessage = nil; operationResult = nil; shouldRespring = false
         var result: String?, failure: String?
         do { result = try operation() } catch { failure = error.localizedDescription }
         isBusy = false
-        refresh(includeActivation: refreshActivation)
+        refresh()
         operationResult = result
         if let failure { errorMessage = failure }
     }
