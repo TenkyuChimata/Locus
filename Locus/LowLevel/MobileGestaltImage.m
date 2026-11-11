@@ -3,7 +3,7 @@
 #import <TargetConditionals.h>
 #import <dlfcn.h>
 #import <mach/mach.h>
-#import <mach/mach_vm.h>
+#import <mach/vm_map.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
 #import <ptrauth.h>
@@ -13,11 +13,20 @@
 #if TARGET_OS_IOS && !TARGET_OS_SIMULATOR && defined(__arm64__)
 static NSData *LocusImageRead(uint64_t address, uint64_t length) {
     if (!address || !length || length > 32 * 1024 * 1024 || address > UINT64_MAX - length) return nil;
+    // iPhoneOS exposes the native-width VM read API through vm_map.h.
+    const vm_address_t source = (vm_address_t)address;
+    const vm_size_t size = (vm_size_t)length;
+    const uint64_t maxAddress = (uint64_t)((vm_address_t)-1);
+    if ((uint64_t)source != address || (uint64_t)size != length ||
+        length > maxAddress - address) return nil;
     NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)length];
-    mach_vm_size_t copied = 0;
-    kern_return_t result = mach_vm_read_overwrite(mach_task_self(), address, length,
-                                                 (mach_vm_address_t)data.mutableBytes, &copied);
-    return result == KERN_SUCCESS && copied == length ? data : nil;
+    const uintptr_t buffer = (uintptr_t)data.mutableBytes;
+    const vm_address_t destination = (vm_address_t)buffer;
+    if (!buffer || (uintptr_t)destination != buffer ||
+        length > maxAddress - (uint64_t)destination) return nil;
+    vm_size_t copied = 0;
+    kern_return_t result = vm_read_overwrite(mach_task_self(), source, size, destination, &copied);
+    return result == KERN_SUCCESS && copied == size ? data : nil;
 }
 
 static BOOL LocusSlide(uint64_t address, intptr_t slide, uint64_t *out) {
