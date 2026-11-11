@@ -473,10 +473,26 @@ int main(void)
         ExpectStage(result, @"backingStage", @"plist-root-type");
         assert([result[@"backingErrorDetails"][@"errors"][0][@"code"] intValue] == 23);
         assert(result[@"backingSchemaValid"] == NSNull.null);
-        assert([[NSData dataWithBytes:"bplist00" length:8] writeToFile:backing atomically:NO]); // Truncated binary plist.
+        // A bare "bplist00" can parse as an OpenStep string. Mismatched XML
+        // tags exercise a parser failure independently of the root-type case.
+        NSData *malformed = [@"<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            @"<plist version=\"1.0\"><dict><key>CountryCode</key>"
+            @"<string>JP</string></array></plist>" dataUsingEncoding:NSUTF8StringEncoding];
+        NSError *parseError = nil;
+        id parsed = [NSPropertyListSerialization propertyListWithData:malformed
+            options:0 format:NULL error:&parseError];
+        fprintf(stderr, "ActivationDiagnostics malformed XML: parsed=%s error=%s:%ld\n",
+            parsed ? "yes" : "no", parseError.domain.UTF8String ?: "<none>", (long)parseError.code);
+        assert(!parsed && parseError);
+        assert([malformed writeToFile:backing atomically:NO]);
         result = Probe();
         ExpectStage(result, @"backingStage", @"plist-parse");
         assert([result[@"backingReadSucceeded"] isEqual:@NO]);
+        NSDictionary *reportedError = result[@"backingErrorDetails"][@"errors"][0];
+        assert([reportedError[@"domain"] isEqual:parseError.domain]);
+        assert([reportedError[@"code"] isEqual:@(parseError.code)]);
+        assert(result[@"backingSchemaValid"] == NSNull.null);
+        assert(result[@"backingWriteAccessAvailable"] == NSNull.null);
 
         WritePlist(@{@"CountryCode": @"CN", @"RegionInfo": @"CH/A", @"SoftwareBehaviors": @321}, backing);
         result = Probe();
