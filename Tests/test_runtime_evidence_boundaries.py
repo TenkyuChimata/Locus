@@ -28,7 +28,7 @@ class RuntimeEvidenceBoundaryTests(unittest.TestCase):
         self.assertIn('NOT re-executed by this collector', source)
         self.assertIn('tableOffset = 0x830, tableCount = 2323, recordSize = 64', source)
 
-    def test_collection_is_independent_of_runtime_queries_leases_and_mutation(self):
+    def test_collection_is_independent_of_runtime_queries_and_mutation(self):
         sources = [ROOT / 'Locus/Diagnostics/MobileGestaltEvidenceCollector.swift',
                    ROOT / 'Locus/LowLevel/MobileGestaltEvidence.m',
                    ROOT / 'Locus/LowLevel/MobileGestaltImage.m',
@@ -44,6 +44,40 @@ class RuntimeEvidenceBoundaryTests(unittest.TestCase):
         mapping = (ROOT / 'Locus/Region/RegionCacheMapping.swift').read_text()
         self.assertIn('static let reviewed: [ReviewedCacheSchema] = []', mapping)
 
+    def test_authorization_is_explicit_and_passive_does_not_request_it(self):
+        native = (ROOT / 'Locus/LowLevel/MobileGestaltEvidence.m').read_text()
+        passive = native.split('LocusCopyMobileGestaltEvidenceFile(void)', 1)[1].split('static void evidenceEvent', 1)[0]
+        self.assertIn('LocusReadEvidenceFile(backingPath)', passive)
+        self.assertNotIn('WorseQuery', passive)
+        authorized = native.split('LocusCopyAuthorizedMobileGestaltEvidenceFile(BOOL userConfirmed)', 1)[1]
+        self.assertLess(authorized.index('if (!userConfirmed)'), authorized.index('[WorseQueryLease leaseForPath:'))
+        self.assertIn('@finally', authorized)
+        self.assertIn('[lease invalidateWithAudit:audit]', authorized)
+        self.assertIn('LocusReadEvidenceFileInDirectory(backingPath, &parent)', authorized)
+        reader = (ROOT / 'Locus/LowLevel/ReadOnlyEvidenceFile.c').read_text()
+        self.assertIn('actual.st_dev != parent->st_dev || actual.st_ino != parent->st_ino', reader)
+        view = (ROOT / 'Locus/Diagnostics/RuntimeDiagnosticsView.swift').read_text()
+        self.assertIn('Export Passive Read-only Evidence', view)
+        self.assertIn('Export Authorized Read-only Evidence', view)
+        self.assertIn('Button("Cancel", role: .cancel) {}', view)
+        self.assertIn('mode: .authorized, userConfirmed: true', view)
+        self.assertIn('mode == .passive || userConfirmed', view)
+        refresh = (ROOT / 'Locus/Diagnostics/RuntimeDiagnosticsService.swift').read_text()
+        self.assertNotIn('MobileGestaltEvidenceCollector', refresh)
+        self.assertNotIn('LocusCopyAuthorizedMobileGestaltEvidenceFile', refresh)
+
+    def test_system_cache_io_remains_read_only(self):
+        native = (ROOT / 'Locus/LowLevel/MobileGestaltEvidence.m').read_text()
+        reader = (ROOT / 'Locus/LowLevel/ReadOnlyEvidenceFile.c').read_text()
+        forbidden = r'\b(?:O_RDWR|O_WRONLY|O_TRUNC|O_CREAT|pwrite|ftruncate|write|rename|unlink|chmod|chown)\b'
+        for source in (native, reader):
+            # Ignore documentation; examine the actual call/flag vocabulary.
+            code = re.sub(r'//[^\n]*|/\*.*?\*/', '', source, flags=re.S)
+            self.assertNotRegex(code, forbidden)
+        bridge = (ROOT / 'Locus/LowLevel/WorseQueryBridge.m').read_text()
+        self.assertNotRegex(bridge, r'\b(?:pwrite|ftruncate|chmod|chown)\s*\(')
+        self.assertIn('LocusQueryWorkspaceEnd', bridge)
+
     def test_behavioral_tests_are_wired_to_ci_scripts(self):
         portable = (ROOT / 'Scripts/test-portable.sh').read_text()
         swift = (ROOT / 'Scripts/test-swift.sh').read_text()
@@ -53,6 +87,11 @@ class RuntimeEvidenceBoundaryTests(unittest.TestCase):
         self.assertIn('Tests/RuntimeEvidence/main.swift', swift)
         self.assertIn('Tests/MobileGestaltEvidenceTests.m', native)
         self.assertIn('Locus/LowLevel/ReadOnlyEvidenceFile.c', native)
+        self.assertIn('Tests/NativeAccessTests.m', native)
+        self.assertIn('Locus/LowLevel/WorseQueryBridge.m', native)
+        access_tests = (ROOT / 'Tests/NativeAccessTests.m').read_text()
+        self.assertIn('../Locus/LowLevel/MobileGestaltEvidence.m', access_tests)
+        self.assertIn('LocusCopyAuthorizedMobileGestaltEvidenceFile(NO)', access_tests)
         bridge = (ROOT / 'Locus/Locus-Bridging-Header.h').read_text()
         self.assertIn('LowLevel/MobileGestaltEvidence.h', bridge)
 

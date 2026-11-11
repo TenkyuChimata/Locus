@@ -18,6 +18,13 @@ NS_ASSUME_NONNULL_BEGIN
                                 error:(NSString * _Nullable * _Nullable)error;
 - (void)invalidate;
 
+// Opt-in diagnostic audit. Contains private directory identity; do not export
+// wholesale. No change to token rights or to the legacy lease API.
++ (nullable instancetype)leaseForPath:(NSString *)path
+                                error:(NSString * _Nullable * _Nullable)error
+                                audit:(NSMutableDictionary<NSString *, id> * _Nullable)audit;
+- (void)invalidateWithAudit:(NSMutableDictionary<NSString *, id> * _Nullable)audit;
+
 @end
 
 FOUNDATION_EXPORT BOOL WorseQueryBridgeAvailable(void);

@@ -12,6 +12,10 @@ typedef struct {
     bool linked;
     dev_t linkDevice;
     ino_t linkInode;
+    // Historical observations survive End; never used to authorize operations.
+    bool lockOpened, cachesWereMoved, linkWasCreated, cleanupAttempted;
+    int cleanupError;
+    double cleanupMilliseconds;
 } LocusQueryWorkspace;
 
 // Returns an errno value. Existing Caches data is moved aside, never deleted.

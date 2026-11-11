@@ -41,8 +41,10 @@ int main(void)
     // Successful query and both failed-query paths share this exact cleanup.
     for (int i = 0; i < 5; i++) {
         assert(LocusQueryWorkspaceBegin(library, target, &workspace) == 0);
+        assert(workspace.lockOpened && workspace.cachesWereMoved && workspace.linkWasCreated);
         assert(LocusQueryWorkspaceBegin(library, target, &competing) != 0);
         assert(LocusQueryWorkspaceEnd(&workspace, target) == 0);
+        assert(workspace.cleanupAttempted && !workspace.cleanupError && !workspace.linked && !workspace.movedCaches);
         assert(LocusQueryWorkspaceEnd(&workspace, target) == 0); // idempotent
         assert(fstatat(fd, "Caches", &after, AT_SYMLINK_NOFOLLOW) == 0);
         assert(before.st_ino == after.st_ino && before.st_dev == after.st_dev);
@@ -57,6 +59,7 @@ int main(void)
     assert(unlinkat(fd, "Caches", 0) == 0);
     assert(symlinkat("/foreign-target", fd, "Caches") == 0);
     assert(LocusQueryWorkspaceEnd(&workspace, target) == ESTALE);
+    assert(workspace.cleanupAttempted && workspace.cleanupError == ESTALE);
     assert(fstatat(fd, ".locus-worse-query-caches", &after, AT_SYMLINK_NOFOLLOW) == 0);
     assert(before.st_ino == after.st_ino);
     assert(LocusQueryWorkspaceBegin(library, target, &competing) == EEXIST);

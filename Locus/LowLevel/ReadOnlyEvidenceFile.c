@@ -4,19 +4,36 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
-static int openWithoutLinks(const char *path)
+static double monotonicMilliseconds(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now)) return 0;
+    return (double)now.tv_sec * 1000 + (double)now.tv_nsec / 1000000;
+}
+
+static int openWithoutLinks(const char *path, const struct stat *parent, unsigned *component)
 {
     if (!path || path[0] != '/' || strlen(path) > 4096) { errno = EINVAL; return -1; }
     char *copy = strdup(path), *cursor = NULL;
     if (!copy) return -1;
     int fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    *component = 0;
     char *part = strtok_r(copy, "/", &cursor);
     if (!part) { free(copy); if (fd >= 0) close(fd); errno = EINVAL; return -1; }
     while (fd >= 0 && part) {
+        (*component)++;
         char *next = strtok_r(NULL, "/", &cursor);
         if (!strcmp(part, ".") || !strcmp(part, "..")) { close(fd); fd = -1; errno = EINVAL; break; }
+        if (!next && parent) {
+            struct stat actual;
+            if (fstat(fd, &actual)) { int saved = errno; close(fd); fd = -1; errno = saved; break; }
+            if (!S_ISDIR(actual.st_mode) || actual.st_dev != parent->st_dev || actual.st_ino != parent->st_ino) {
+                close(fd); fd = -1; errno = ESTALE; break;
+            }
+        }
         int child = openat(fd, part, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK |
                            (next ? O_DIRECTORY : 0));
         int saved = errno;
@@ -62,9 +79,20 @@ static int readExactly(int fd, unsigned char *bytes, size_t length)
 
 LocusEvidenceFile LocusReadEvidenceFile(const char *path)
 {
+    return LocusReadEvidenceFileInDirectory(path, NULL);
+}
+
+LocusEvidenceFile LocusReadEvidenceFileInDirectory(const char *path, const struct stat *parent)
+{
     LocusEvidenceFile r = { .stage = "open-read-only-no-follow" };
-    int fd = openWithoutLinks(path);
-    if (fd < 0) { r.error = errno; return r; }
+    int step = 0;
+    double began = monotonicMilliseconds();
+#define FINISH_STEP() do { r.steps[step] = (LocusEvidenceReadStep){ true, r.error == 0, r.error, monotonicMilliseconds() - began }; } while (0)
+#define NEXT_STEP() do { FINISH_STEP(); step++; began = monotonicMilliseconds(); } while (0)
+    int fd = openWithoutLinks(path, parent, &r.failedComponent);
+    if (fd < 0) { r.error = errno; FINISH_STEP(); return r; }
+    r.failedComponent = 0;
+    NEXT_STEP();
     r.stage = "fstat-before";
     if (fstat(fd, &r.before)) { r.error = errno; goto done; }
     r.stage = "regular-file-and-size";
@@ -75,27 +103,42 @@ LocusEvidenceFile LocusReadEvidenceFile(const char *path)
     r.first = malloc(r.length);
     r.second = malloc(r.length);
     if (!r.first || !r.second) { r.error = ENOMEM; goto done; }
+    NEXT_STEP();
     r.stage = "first-pread";
     if ((r.error = readExactly(fd, r.first, r.length))) goto done;
+    NEXT_STEP();
     r.stage = "fstat-between";
     if (fstat(fd, &r.between)) { r.error = errno; goto done; }
+    NEXT_STEP();
+    if (!sameMetadata(r.before, r.between)) {
+        r.steps[3].completed = false; r.steps[3].error = EBUSY;
+    }
     r.stage = "second-pread-same-fd";
     if ((r.error = readExactly(fd, r.second, r.length))) goto done;
+    NEXT_STEP();
     r.stage = "fstat-after";
     if (fstat(fd, &r.after)) { r.error = errno; goto done; }
     r.metadataAvailable = true;
+    NEXT_STEP();
+    if (!sameMetadata(r.before, r.after)) {
+        r.steps[5].completed = false; r.steps[5].error = EBUSY;
+    }
     r.stage = "reopen-path-without-links";
-    int named = openWithoutLinks(path);
+    int named = openWithoutLinks(path, parent, &r.failedComponent);
     if (named < 0) { r.error = errno; goto done; }
     int rc = fstat(named, &r.namedAfter), saved = errno;
     close(named);
     if (rc) { r.error = saved; goto done; }
     r.namedAvailable = true;
+    r.failedComponent = 0;
     r.stage = "compare-bytes-and-metadata";
     r.stable = sameMetadata(r.before, r.between) && sameMetadata(r.before, r.after) &&
         sameMetadata(r.before, r.namedAfter) && !memcmp(r.first, r.second, r.length);
     if (!r.stable) r.error = EBUSY;
 done:
+    FINISH_STEP();
+#undef NEXT_STEP
+#undef FINISH_STEP
     close(fd);
     // Partial reads must never be parsed or hashed as complete observations.
     if (!r.metadataAvailable) { free(r.first); free(r.second); r.first = r.second = NULL; }

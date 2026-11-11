@@ -7,6 +7,7 @@ struct RuntimeDiagnosticsView: View {
     @State private var exportedEvidenceURL: URL?
     @State private var evidenceError: String?
     @State private var isCollectingEvidence = false
+    @State private var confirmAuthorizedEvidence = false
 
     var body: some View {
         NavigationStack {
@@ -35,6 +36,14 @@ struct RuntimeDiagnosticsView: View {
                 mobileGestaltSection(group: .region, title: "MobileGestalt Region / Runtime")
             }
             .navigationTitle("Runtime Diagnostics")
+            .alert("Authorize Read-only Evidence Collection?", isPresented: $confirmAuthorizedEvidence) {
+                Button("Cancel", role: .cancel) {}
+                Button("Authorize and Export") {
+                    beginEvidenceExport(mode: .authorized, userConfirmed: true)
+                }
+            } message: {
+                Text("This mode may request temporary process-wide access and create or rearrange the app’s App Group workspace, including symbolic links. The access mechanism may have broader rights and limited side effects; Library or lock files and existing shared grants may remain. Collection only opens the system cache read-only and does not write its contents. Evidence may remain INCOMPLETE. This export does not enable region modification. Safe Mutation Authorization stays NO-GO.")
+            }
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
@@ -173,26 +182,19 @@ struct RuntimeDiagnosticsView: View {
     private var cacheLayoutSection: some View {
         Section {
             Button {
-                isCollectingEvidence = true
-                evidenceError = nil
-                Task { @MainActor in
-                    await Task.yield()
-                    defer { isCollectingEvidence = false }
-                    do {
-                        let report = MobileGestaltEvidenceCollector.collect()
-                        let url = try MobileGestaltEvidenceCollector.export(report)
-                        exportedEvidenceURL = url
-                        evidenceExport = EvidenceExport(url: url)
-                    } catch {
-                        evidenceError = "Evidence export failed: \(error.localizedDescription)"
-                    }
-                }
+                beginEvidenceExport(mode: .passive)
             } label: {
-                Label(isCollectingEvidence ? "Collecting Read-only Evidence…" : "Export Read-only Runtime Evidence",
+                Label(isCollectingEvidence ? "Collecting Read-only Evidence…" : "Export Passive Read-only Evidence",
                       systemImage: "square.and.arrow.up")
             }
             .disabled(isCollectingEvidence || service.isLoading)
-            Text("System data is only read. A redacted JSON is created in the app temporary directory for sharing. Safe Mutation Authorization stays NO-GO.")
+            Button {
+                confirmAuthorizedEvidence = true
+            } label: {
+                Label("Export Authorized Read-only Evidence", systemImage: "lock.open")
+            }
+            .disabled(isCollectingEvidence || service.isLoading)
+            Text("Passive export requests no access or workspace. Authorized export requires confirmation and may create temporary authorization state. Both create a redacted JSON in the app temporary directory for sharing. Safe Mutation Authorization stays NO-GO.")
                 .font(.caption).foregroundStyle(.secondary)
             if let evidenceError {
                 Text(evidenceError).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
@@ -233,6 +235,24 @@ struct RuntimeDiagnosticsView: View {
             Text("MobileGestalt Cache Layout")
         } footer: {
             Text("Structural consistency does not establish question-to-slot mappings or enable writes.")
+        }
+    }
+
+    private func beginEvidenceExport(mode: MobileGestaltEvidenceCollector.CollectionMode, userConfirmed: Bool = false) {
+        guard !isCollectingEvidence, !service.isLoading, mode == .passive || userConfirmed else { return }
+        isCollectingEvidence = true
+        evidenceError = nil
+        Task { @MainActor in
+            await Task.yield()
+            defer { isCollectingEvidence = false }
+            do {
+                let report = MobileGestaltEvidenceCollector.collect(mode: mode, userConfirmed: userConfirmed)
+                let url = try MobileGestaltEvidenceCollector.export(report)
+                exportedEvidenceURL = url
+                evidenceExport = EvidenceExport(url: url)
+            } catch {
+                evidenceError = "Evidence export failed: \(error.localizedDescription)"
+            }
         }
     }
 

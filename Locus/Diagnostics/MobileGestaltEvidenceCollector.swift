@@ -4,6 +4,25 @@ import Foundation
 /// This report has no relationship to ReviewedCacheSchema or mutation admission.
 /// Native snapshots are private inputs; only the explicit allowlist below is exported.
 enum MobileGestaltEvidenceCollector {
+    enum CollectionMode: String {
+        case passive = "passive-read-only"
+        case authorized = "authorized-read-only"
+    }
+    static let stageIDs = ["authorization-requested", "authorization-result", "workspace-preparation",
+        "authorized-path-resolution", "read-only-fd-open", "file-identity-validation", "first-full-read",
+        "intermediate-metadata-check", "second-full-read", "final-metadata-check", "path-identity-revalidation",
+        "authorization-release", "workspace-cleanup"]
+    static let reasonCodes: Set<String> = ["not-executed", "unavailable", "user-not-confirmed", "user-confirmed",
+        "workspace-refused", "workspace-prepared", "workspace-restored", "workspace-recovery-required",
+        "library-preparation-failed", "token-release-failed", "token-released", "prior-token-release-failed",
+        "prior-token-released", "lease-accounting-unavailable", "shared-reference-returned-token-retained",
+        "lease-acquired-rights-not-introspected", "lease-not-acquired", "fixed-backing-path-selected-no-alias",
+        "target-metadata-unavailable-or-unsupported", "app-group-unavailable", "query-create-failed",
+        "query-rejected-or-token-unusable", "target-outside-scope", "signed-app-group-unavailable", "authorization-api-unavailable",
+        "read-step-completed", "read-step-unavailable"]
+    static let effectCodes: Set<String> = ["app-group-library-create-directory-attempt",
+        "app-group-lock-opened-or-created-and-retained", "app-group-caches-directory-temporarily-renamed",
+        "app-group-caches-symlink-created", "process-sandbox-token-consume-attempt"]
     struct Target {
         let name: String, hash: String
         let offset: Int, slot: Int, flags: UInt8
@@ -43,18 +62,64 @@ enum MobileGestaltEvidenceCollector {
         return formatter.string(from: date)
     }
 
-    static func collect() -> [String: Any] {
+    static func collect(mode: CollectionMode = .passive, userConfirmed: Bool = false) -> [String: Any] {
         let start = Date()
         #if os(iOS)
-        let device = LocusCopyEvidenceDeviceIdentity()
-        let image = LocusCopyMobileGestaltImage() // Does not load or query MG.
-        let cache = LocusCopyMobileGestaltEvidenceFile()
+        let allowed = mode == .passive || userConfirmed
+        let device: [String: Any] = allowed ? LocusCopyEvidenceDeviceIdentity() : [:]
+        let image: [String: Any] = allowed ? LocusCopyMobileGestaltImage() : [:] // Does not load or query MG.
+        let cache = mode == .passive ? LocusCopyMobileGestaltEvidenceFile() :
+            LocusCopyAuthorizedMobileGestaltEvidenceFile(userConfirmed)
         #else
         let device: [String: Any] = [:]
         let image: [String: Any] = ["error": "iOS loaded image unavailable on this host."]
         let cache: [String: Any] = ["stage": "host-unavailable"]
         #endif
-        return assemble(device: device, image: image, file: cache, started: start, ended: Date())
+        return assemble(device: device, image: image, file: cache, started: start, ended: Date(), mode: mode)
+    }
+
+    /// Native authorization dictionaries include private identities. Export only
+    /// fixed enums, booleans, bounded errno and finite elapsed times.
+    static func authorization(_ file: [String: Any], mode: CollectionMode) -> [String: Any] {
+        let raw = mode == .authorized ? (file["authorization"] as? [String: Any] ?? [:]) : [:]
+        let nativeEvents = (raw["events"] as? [[String: Any]] ?? []) + (file["readEvents"] as? [[String: Any]] ?? [])
+        var stages: [[String: Any]] = nativeEvents.compactMap { event in
+            guard let id = event["id"] as? String, stageIDs.contains(id) else { return nil }
+            let status = event["status"] as? String ?? "INCOMPLETE"
+            let reason = event["reason"] as? String ?? "unavailable"
+            let effects = event["sideEffects"] as? String ?? "unknown"
+            let duration = (event["elapsedMilliseconds"] as? NSNumber)?.doubleValue
+            let error = (event["errno"] as? NSNumber)?.intValue
+            return ["id": id, "status": ["PASS", "FAIL", "INCOMPLETE"].contains(status) ? status : "INCOMPLETE",
+                "elapsedMilliseconds": json(duration.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }),
+                "errno": json(error.flatMap { (1...4096).contains($0) ? $0 : nil }),
+                "reason": reasonCodes.contains(reason) ? reason : "unavailable",
+                "sideEffects": ["no", "yes", "possible", "unknown"].contains(effects) ? effects : "unknown"]
+        }
+        for id in stageIDs where !stages.contains(where: { $0["id"] as? String == id }) {
+            stages.append(["id": id, "status": "INCOMPLETE", "elapsedMilliseconds": null, "errno": null,
+                "reason": "not-executed", "sideEffects": "no"])
+        }
+        let effects = raw["sideEffects"] as? [String] ?? []
+        let attempts: [[String: Any]] = (raw["attempts"] as? [[String: Any]] ?? []).prefix(2).compactMap { attempt in
+            guard let variant = attempt["variant"] as? Int, (1...2).contains(variant) else { return nil }
+            let duration = (attempt["elapsedMilliseconds"] as? NSNumber)?.doubleValue
+            let error = (attempt["errno"] as? NSNumber)?.intValue
+            return ["variant": variant, "resultReturned": json(attempt["resultReturned"] as? Bool),
+                "tokenIssued": json(attempt["tokenIssued"] as? Bool), "consumed": json(attempt["consumed"] as? Bool),
+                "errno": json(error.flatMap { (1...4096).contains($0) ? $0 : nil }),
+                "elapsedMilliseconds": json(duration.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil })]
+        }
+        return ["requested": mode == .authorized && raw["requested"] as? Bool == true,
+            "mechanism": mode == .authorized ? "existing-worse-query-app-group-part-lease" : "none",
+            "granted": json(raw["granted"] as? Bool),
+            "scope": mode == .authorized ? "Requested existing MobileGestalt cache directory; process-wide token rights not introspected or restricted to read-only." : "No authorization requested by this collection.",
+            "grantReused": json(raw["grantReused"] as? Bool),
+            "referenceReleased": json(raw["referenceReleased"] as? Bool), "tokenRevoked": json(raw["tokenRevoked"] as? Bool),
+            "otherLeaseHoldersRemain": json(raw["otherLeaseHoldersRemain"] as? Bool),
+            "cleanupSucceeded": json(raw["cleanupSucceeded"] as? Bool),
+            "cleanupScope": "Restore temporary App Group Caches link/directory only; Library and lock file may remain. Tokens remain active while other lease holders remain.",
+            "sideEffects": Array(Set(effects.filter { effectCodes.contains($0) })).sorted(), "attempts": attempts, "stages": stages]
     }
 
     /// Only a sandbox temporary directory is ever written by this component.
@@ -97,7 +162,7 @@ enum MobileGestaltEvidenceCollector {
     }
 
     static func assemble(device: [String: Any], image: [String: Any], file: [String: Any],
-                         started: Date, ended: Date) -> [String: Any] {
+                         started: Date, ended: Date, mode: CollectionMode = .passive) -> [String: Any] {
         var checks: [[String: Any]] = []
         // nil means unobservable, false means a concrete mismatch.
         func check(_ id: String, _ result: Bool?, _ detail: String) {
@@ -235,6 +300,27 @@ enum MobileGestaltEvidenceCollector {
         }
         let descriptorSummary = summary(checks.filter { ($0["id"] as? String)?.hasPrefix("descriptors.") == true })
 
+        let publicAuthorization = authorization(file, mode: mode)
+        if mode == .authorized {
+            let stages = publicAuthorization["stages"] as? [[String: Any]] ?? []
+            let reused = publicAuthorization["grantReused"] as? Bool == true
+            let required = Set(stageIDs.filter { !reused || !["workspace-preparation", "workspace-cleanup"].contains($0) })
+            let allStagesPass = required.allSatisfy { id in
+                let observations = stages.filter { $0["id"] as? String == id }
+                return !observations.isEmpty && observations.allSatisfy {
+                    $0["status"] as? String == "PASS" && $0["elapsedMilliseconds"] is NSNumber && $0["errno"] is NSNull &&
+                        !["unavailable", "not-executed"].contains($0["reason"] as? String ?? "unavailable")
+                }
+            }
+            let observedFailure = stages.contains { $0["status"] as? String == "FAIL" }
+            let ready = publicAuthorization["requested"] as? Bool == true && publicAuthorization["granted"] as? Bool == true &&
+                publicAuthorization["referenceReleased"] as? Bool == true &&
+                (publicAuthorization["tokenRevoked"] as? Bool == true || publicAuthorization["otherLeaseHoldersRemain"] as? Bool == true) &&
+                (reused || publicAuthorization["cleanupSucceeded"] as? Bool == true) && allStagesPass
+            check("authorization.lifecycle", ready ? true : (observedFailure ? false : nil),
+                "Explicit confirmation, usable lease, checked direct-path reads, reference release and any workspace restoration required. Shared tokens may remain active; rights are not read-only scoped.")
+        }
+
         let first = file["first"] as? Data, second = file["second"] as? Data
         let firstHash = first.map { RegionBackupDigest.sha256($0) }
         let secondHash = second.map { RegionBackupDigest.sha256($0) }
@@ -244,7 +330,8 @@ enum MobileGestaltEvidenceCollector {
         let readError = (file["errno"] as? NSNumber)?.intValue
         let stable = first != nil && first == second && firstHash == secondHash && metadataEqual &&
             file["stable"] as? Bool == true && readError == 0
-        let observedChange = readError == Int(POSIXErrorCode.EBUSY.rawValue) || (first != nil && second != nil && (first != second || (metadataComplete && !metadataEqual)))
+        let observedChange = readError == Int(POSIXErrorCode.EBUSY.rawValue) || readError == Int(POSIXErrorCode.ESTALE.rawValue) ||
+            (first != nil && second != nil && (first != second || (metadataComplete && !metadataEqual)))
         check("cache.stableFile", stable ? true : (observedChange ? false : nil),
               "Two complete reads on one O_RDONLY fd plus before/between/after metadata and path re-open. This is not an atomic cross-process snapshot. Stage: \(file["stage"] as? String ?? "unavailable"); errno: \(readError.map(String.init) ?? "unavailable").")
         var plist: [String: Any]?
@@ -314,6 +401,7 @@ enum MobileGestaltEvidenceCollector {
         let publicCache: [String: Any] = [
             "sourceClass": "system-MobileGestalt-backing-plist", "stableAcrossObservedReads": stable,
             "readStage": json(file["stage"] as? String), "errno": json(readError),
+            "failedPathComponentOrdinal": json((file["failedComponent"] as? NSNumber)?.uintValue),
             "readErrorDescription": json(readError.flatMap { $0 == 0 ? nil : NSError(domain: NSPOSIXErrorDomain, code: $0).localizedDescription }),
             "rawFileSHA256": json(firstHash), "secondReadSHA256": json(secondHash),
             "rawFileByteCount": json(first?.count),
@@ -336,12 +424,13 @@ enum MobileGestaltEvidenceCollector {
             "runtimeBindingScope": "Observed loaded ordinary-Key descriptors and persisted cache only; no in-memory answer provenance, atomicity or callback PAC proof.",
             "independentReview": "Pending independent review of this report", "callbackPACAuthentication": "Not Verified",
             "safeMutationAuthorization": "NO-GO"]
-        return ["schemaVersion": 1, "collectionMode": "read-only", "redacted": true,
+        return ["schemaVersion": 2, "collectionMode": mode.rawValue, "redacted": true,
             "collectedAt": timestamp(started), "collectionStartedAt": timestamp(started), "collectionEndedAt": timestamp(ended),
             "device": publicDevice, "loadedImage": publicImage, "descriptors": descriptors,
-            "cacheInstance": publicCache, "checks": checks, "assessment": assessment,
+            "cacheInstance": publicCache, "authorization": publicAuthorization, "checks": checks, "assessment": assessment,
             "limitations": ["No MG answers are queried; earlier ordinary Refresh may already have initialized MG.",
                 "Two equal reads cannot exclude ABA changes, later changes or prove the process uses this persisted cache.",
+                "Passive collection requests no lease but may inherit existing process grants. Authorized collection can create App Group state and consume a process-wide token with unverified rights.",
                 "PASS applies only to the listed observations; it never registers a writable schema."]]
     }
 }

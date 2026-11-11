@@ -16,6 +16,19 @@ struct Fixture {
     var sectionsOverride: [[String: Any]]?
     var metadataSnapshot = "after"
     var metadataChanges: [String: Any] = [:]
+    var mode = Collector.CollectionMode.passive
+    var authorization: [String: Any] = [:]
+    mutating func authorize() {
+        mode = .authorized
+        authorization = ["requested": true, "granted": true, "grantReused": false,
+            "referenceReleased": true, "tokenRevoked": true, "otherLeaseHoldersRemain": false, "cleanupSucceeded": true,
+            "directoryInode": "PRIVATE-INODE", "token": "PRIVATE-TOKEN", "targetPath": "/PRIVATE-PATH",
+            "attempts": [["variant": 1, "resultReturned": true, "tokenIssued": true, "consumed": true,
+                "elapsedMilliseconds": 0.1, "errno": NSNull(), "token": "PRIVATE-ATTEMPT"]],
+            "sideEffects": ["app-group-caches-symlink-created", "PRIVATE-EFFECT"],
+            "events": Collector.stageIDs.map { ["id": $0, "status": "PASS", "elapsedMilliseconds": 0.25,
+                "errno": NSNull(), "reason": "read-step-completed", "sideEffects": "no"] as [String: Any] }]
+    }
     init() {
         for target in Collector.targets {
             let pointer = UInt64(0x1000000 + strings.count)
@@ -45,8 +58,9 @@ struct Fixture {
             "stable": stable, "errno": error, "stage": "synthetic-double-read",
             "before": metadata, "between": metadata, "after": metadata, "namedAfter": metadata]
         file[metadataSnapshot] = metadata.merging(metadataChanges) { _, changed in changed }
+        file["authorization"] = authorization
         return Collector.assemble(device: device, image: observedImage, file: file,
-            started: Date(timeIntervalSince1970: 1000.123), ended: Date(timeIntervalSince1970: 1000.456))
+            started: Date(timeIntervalSince1970: 1000.123), ended: Date(timeIntervalSince1970: 1000.456), mode: mode)
     }
 }
 func status(_ report: [String: Any], _ id: String) -> String {
@@ -70,13 +84,16 @@ assert((good["assessment"] as! [String: Any])["callbackPACAuthentication"] as? S
 assert((good["collectedAt"] as! String).contains(".123"))
 var cases = 0
 func rejects(_ id: String, expected: String = "FAIL", _ mutate: (inout Fixture) -> Void) {
+    for mode in [Collector.CollectionMode.passive, .authorized] {
     var f = Fixture(); mutate(&f)
+    if mode == .authorized { f.authorize() }
     let report = f.report()
     if status(report, id) != expected || binding(report) == "PASS" { diagnose(report, id) }
     assert(status(report, id) == expected, "\(id): \(status(report, id)) != \(expected)")
     assert(binding(report) != "PASS", id)
     assert((report["assessment"] as! [String: Any])["safeMutationAuthorization"] as? String == "NO-GO")
     cases += 1
+    }
 }
 // Preserve all eleven stat fields and compare their full NSNumber values.
 let metadataKeys = ["device", "inode", "size", "mode", "uid", "gid", "links", "mtimeSeconds", "mtimeNanoseconds", "ctimeSeconds", "ctimeNanoseconds"]
@@ -145,11 +162,74 @@ rejects("cache.green-tea.noOverride") { $0.plist["CacheExtra"] = ["green-tea": t
 rejects("cache.extraType") { $0.plist["CacheExtra"] = "wrong-type" }
 rejects("cache.stableFile") { $0.secondOverride = Data([0, 1]); $0.stable = false; $0.error = Int(POSIXErrorCode.EBUSY.rawValue) }
 rejects("cache.stableFile", expected: "INCOMPLETE") { $0.stable = false; $0.error = Int(POSIXErrorCode.EACCES.rawValue) }
+rejects("cache.stableFile", expected: "INCOMPLETE") { $0.stable = false; $0.error = Int(POSIXErrorCode.EPERM.rawValue) }
+rejects("cache.stableFile") { $0.stable = false; $0.error = Int(POSIXErrorCode.ESTALE.rawValue) }
 rejects("cache.plist") { $0.firstOverride = Data("not a plist".utf8) }
 var f = Fixture(); for target in Collector.targets { f.cache[target.slot * 8] = 0 }
 let allFalse = f.report()
 if binding(allFalse) != "PASS" { diagnose(allFalse, "all-false fixture") }
 assert(binding(allFalse) == "PASS") // Values need not match a target or past device observation.
+var authorized = Fixture(); authorized.authorize()
+let authorizedGood = authorized.report()
+assert(binding(authorizedGood) == "PASS") // Synthetic authorization is not an iOS permission proof.
+assert(authorizedGood["schemaVersion"] as? Int == 2)
+assert(authorizedGood["collectionMode"] as? String == "authorized-read-only")
+assert(good["collectionMode"] as? String == "passive-read-only")
+assert((good["authorization"] as! [String: Any])["requested"] as? Bool == false)
+assert((authorizedGood["assessment"] as! [String: Any])["safeMutationAuthorization"] as? String == "NO-GO")
+var authorizationCases = 0
+func rejectsAuthorization(_ mutate: (inout [String: Any]) -> Void) {
+    var f = Fixture(); f.authorize(); mutate(&f.authorization)
+    let report = f.report()
+    assert(binding(report) != "PASS")
+    assert(status(report, "authorization.lifecycle") != "PASS")
+    assert((report["assessment"] as! [String: Any])["safeMutationAuthorization"] as? String == "NO-GO")
+    authorizationCases += 1
+}
+for field in ["requested", "granted", "referenceReleased", "tokenRevoked", "cleanupSucceeded"] {
+    rejectsAuthorization { $0[field] = false }
+    rejectsAuthorization { $0.removeValue(forKey: field) }
+}
+for id in Collector.stageIDs {
+    rejectsAuthorization { a in a["events"] = (a["events"] as! [[String: Any]]).filter { $0["id"] as? String != id } }
+    for value in ["FAIL", "INCOMPLETE"] {
+        rejectsAuthorization { a in
+            a["events"] = (a["events"] as! [[String: Any]]).map { e -> [String: Any] in
+                var changed = e; if e["id"] as? String == id { changed["status"] = value }; return changed
+            }
+        }
+    }
+}
+for invalidDuration: Any in [Double.nan, Double.infinity, -1.0, "PRIVATE-DURATION"] {
+    rejectsAuthorization { a in
+        var events = a["events"] as! [[String: Any]]; events[0]["elapsedMilliseconds"] = invalidDuration; a["events"] = events
+    }
+}
+// Shared grants return this collection's reference; they do not revoke Refresh's token.
+var reused = authorized
+reused.authorization["grantReused"] = true
+reused.authorization["tokenRevoked"] = false
+reused.authorization["otherLeaseHoldersRemain"] = true
+reused.authorization.removeValue(forKey: "cleanupSucceeded")
+reused.authorization["events"] = (reused.authorization["events"] as! [[String: Any]]).filter {
+    !["workspace-preparation", "workspace-cleanup"].contains($0["id"] as! String)
+}
+assert(binding(reused.report()) == "PASS")
+var fallback = authorized
+fallback.authorization["attempts"] = [
+    ["variant": 1, "resultReturned": true, "tokenIssued": true, "consumed": false, "elapsedMilliseconds": 0.1, "errno": 1],
+    ["variant": 2, "resultReturned": true, "tokenIssued": true, "consumed": true, "elapsedMilliseconds": 0.1, "errno": NSNull()]
+]
+assert(binding(fallback.report()) == "PASS") // Prior attempt error is separate from the final result.
+assert(((fallback.report()["authorization"] as! [String: Any])["attempts"] as! [[String: Any]]).count == 2)
+// A failed release remains visible even when both file reads were complete.
+rejectsAuthorization { a in
+    a["tokenRevoked"] = false
+    var events = a["events"] as! [[String: Any]]
+    events[11]["status"] = "FAIL"; events[11]["errno"] = 1; a["events"] = events
+}
+let cancelled = Collector.collect(mode: .authorized, userConfirmed: false)
+assert(binding(cancelled) != "PASS" && (cancelled["authorization"] as! [String: Any])["requested"] as? Bool == false)
 let temp = FileManager.default.temporaryDirectory.appendingPathComponent("LocusEvidenceTest-" + UUID().uuidString)
 try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: false)
 defer { try? FileManager.default.removeItem(at: temp) }
@@ -159,14 +239,24 @@ let decodedJSON = try JSONSerialization.jsonObject(with: json)
 assert(JSONSerialization.isValidJSONObject(decodedJSON))
 let text = String(decoding: json, as: UTF8.self)
 for sensitive in ["PRIVATE-CACHE-EXTRA", "8675309", "123456789", "16777216", "33554432"] { assert(!text.contains(sensitive)) }
+let authorizedJSON = try JSONSerialization.data(withJSONObject: authorizedGood)
+let authorizedText = String(decoding: authorizedJSON, as: UTF8.self)
+for sensitive in ["PRIVATE-INODE", "PRIVATE-TOKEN", "PRIVATE-ATTEMPT", "/PRIVATE-PATH", "PRIVATE-EFFECT", "PRIVATE-CACHE-EXTRA"] {
+    assert(!authorizedText.contains(sensitive))
+}
+let authorizedURL = try Collector.export(authorizedGood, directory: temp)
+let exportedAuthorized = try JSONSerialization.jsonObject(with: Data(contentsOf: authorizedURL)) as! [String: Any]
+assert(exportedAuthorized["collectionMode"] as? String == "authorized-read-only")
 do {
     _ = try Collector.export(["invalid": Double.nan], directory: temp)
     assertionFailure("Serialization failure was swallowed")
 } catch {}
-do {
-    _ = try Collector.export(good, directory: temp) { _, _ in throw NSError(domain: "SyntheticWriter", code: 1) }
-    assertionFailure("Write failure was swallowed")
-} catch { assert((error as NSError).domain == "SyntheticWriter") }
+for report in [good, authorizedGood] {
+    do {
+        _ = try Collector.export(report, directory: temp) { _, _ in throw NSError(domain: "SyntheticWriter", code: 1) }
+        assertionFailure("Write failure was swallowed")
+    } catch { assert((error as NSError).domain == "SyntheticWriter") }
+}
 let remaining = try FileManager.default.contentsOfDirectory(atPath: temp.path)
-assert(remaining.count == 1) // Failed export directory cleaned.
-print("PASS: actual evidence assembly, \(cases) mismatch/unavailable paths, redaction, JSON export and injected serialization/write failures; synthetic observations only")
+assert(remaining.count == 2) // Both successful exports retained; both failures cleaned.
+print("PASS: actual evidence assembly, \(cases) mismatch/unavailable paths in both modes, \(authorizationCases) authorization failures, shared-grant/cancellation, redaction, JSON export and injected serialization/write failures; synthetic observations only")
