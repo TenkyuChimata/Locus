@@ -24,7 +24,7 @@ struct RegionIdentityView: View {
                 Section("Individual Region Settings") {
                     ForEach(RegionModule.allCases.filter { $0 != .fullJapan }) { moduleRow($0) }
                 }
-                moduleSection("Full Japan Region", [.fullJapan])
+                fullJapanSection
                 if let detail = service.recoveryDetail {
                     Section("Recovery") {
                         Text(detail).font(.caption.monospaced()).textSelection(.enabled)
@@ -80,8 +80,76 @@ struct RegionIdentityView: View {
         }
     }
 
-    private func moduleSection(_ title: String, _ modules: [RegionModule]) -> some View {
-        Section(title) { ForEach(modules) { moduleRow($0) } }
+    private var fullJapanSection: some View {
+        Section("Full Japan Region") {
+            if let status = service.modules.first(where: { $0.module == .fullJapan }) {
+                fullJapanValue("Verification", status.verification)
+                fullJapanValue("Access Status", status.access)
+            } else {
+                fullJapanValue("Verification", nil)
+            }
+            Text("Applied means all six persistent cache settings match their targets. Restart, check runtime answers and test affected features separately; system region behavior is not verified by this status.")
+                .font(.footnote).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // Use the individual statuses directly, never the composite strings.
+            // Keep every field visible even when its status is unavailable.
+            ForEach(RegionModule.allCases.filter { $0 != .fullJapan }) { module in
+                fullJapanField(module)
+            }
+
+            if let status = service.modules.first(where: { $0.module == .fullJapan }) {
+                Button {
+                    if service.prepare(.fullJapan) { action = .init(module: .fullJapan, restore: false) }
+                } label: {
+                    Text("Review Changes").frame(maxWidth: .infinity)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .buttonStyle(.bordered)
+                .disabled(service.isBusy || !status.canApply)
+                Button {
+                    if service.prepare(.fullJapan, restore: true) { action = .init(module: .fullJapan, restore: true) }
+                } label: {
+                    Text("Restore").frame(maxWidth: .infinity)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .buttonStyle(.bordered)
+                .disabled(service.isBusy || !status.canRestore)
+                fullJapanValue("Original Backup", status.originalAvailable ? "Available" : "Not yet saved")
+                DisclosureGroup("Details") {
+                    Text(status.detail).font(.footnote).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    private func fullJapanField(_ module: RegionModule) -> some View {
+        let status = service.modules.first(where: { $0.module == module })
+        return VStack(alignment: .leading, spacing: 12) {
+            Text(module.title).font(.headline)
+                .fixedSize(horizontal: false, vertical: true)
+            fullJapanValue("Current", status?.cache)
+            fullJapanValue("Target", status?.expected)
+            DisclosureGroup("Runtime") {
+                fullJapanValue("Runtime", status?.runtime)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func fullJapanValue(_ title: String, _ text: String?) -> some View {
+        let display = (text.flatMap { $0.isEmpty ? nil : $0 } ?? "Unavailable")
+            .replacingOccurrences(of: "<unavailable>", with: "Unavailable")
+            .replacingOccurrences(of: "<nil>", with: "Unavailable")
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.subheadline).foregroundStyle(.secondary)
+            Text(display).font(.body.monospaced()).textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .lineLimit(nil)
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .combine)
     }
     @ViewBuilder private func moduleRow(_ module: RegionModule) -> some View {
         if let status = service.modules.first(where: { $0.module == module }) {
