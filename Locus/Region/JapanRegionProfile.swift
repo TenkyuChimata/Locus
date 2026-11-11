@@ -13,15 +13,40 @@ struct JapanRegionProfile: Equatable, Sendable {
             .first.map(String.init) ?? productType
         guard let values = verifiedModels[normalized] else { return nil }
         return JapanRegionProfile(
-            productType: normalized,
+            productType: productType,
             marketingName: values.0,
             regulatoryModel: values.1
         )
     }
 
-    // This is the verified map inherited from the existing Japan-region
-    // implementation. Unsupported ProductTypes are intentionally refused.
+    // Japan sales models: https://support.apple.com/ja-jp/108044 and
+    // https://support.apple.com/en-us/108043. ProductType/configuration names:
+    // libimobiledevice/libirecovery src/libirecovery.c (reviewed 2026-11-11).
+    // Wi-Fi/Cellular identifiers stay separate; never use a marketing-name
+    // fallback. Ambiguous new regional boards are deliberately omitted.
     private static let verifiedModels: [String: (String, String)] = [
+        "iPhone12,1": ("iPhone 11", "A2221"),
+        "iPhone12,3": ("iPhone 11 Pro", "A2215"),
+        "iPhone12,5": ("iPhone 11 Pro Max", "A2218"),
+        "iPhone12,8": ("iPhone SE (2nd generation)", "A2296"),
+        "iPhone13,1": ("iPhone 12 mini", "A2398"),
+        "iPhone13,2": ("iPhone 12", "A2402"),
+        "iPhone13,3": ("iPhone 12 Pro", "A2406"),
+        "iPhone13,4": ("iPhone 12 Pro Max", "A2410"),
+        "iPhone14,2": ("iPhone 13 Pro", "A2636"),
+        "iPhone14,3": ("iPhone 13 Pro Max", "A2641"),
+        "iPhone14,4": ("iPhone 13 mini", "A2626"),
+        "iPhone14,5": ("iPhone 13", "A2631"),
+        "iPhone14,6": ("iPhone SE (3rd generation)", "A2782"),
+        "iPhone14,7": ("iPhone 14", "A2881"),
+        "iPhone14,8": ("iPhone 14 Plus", "A2885"),
+        "iPhone15,2": ("iPhone 14 Pro", "A2889"),
+        "iPhone15,3": ("iPhone 14 Pro Max", "A2893"),
+        "iPhone15,4": ("iPhone 15", "A3089"),
+        "iPhone15,5": ("iPhone 15 Plus", "A3093"),
+        "iPhone19,2": ("iPhone 18 Pro", "A3713"),
+        "iPhone19,4": ("iPhone Duo", "A3719"),
+        // iPhone18 Pro Max US/global board-to-Japan mapping is unresolved.
         // iPhone 15 Pro
         "iPhone16,1": ("iPhone 15 Pro", "A3101"),
         "iPhone16,2": ("iPhone 15 Pro Max", "A3105"),
@@ -39,6 +64,13 @@ struct JapanRegionProfile: Equatable, Sendable {
         "iPhone18,3": ("iPhone 17", "A3519"),
         "iPhone18,4": ("iPhone Air", "A3516"),
         "iPhone18,5": ("iPhone 17e", "A3575"),
+
+        "iPad13,18": ("iPad (10th generation, Wi-Fi)", "A2696"),
+        "iPad13,19": ("iPad (10th generation, Cellular)", "A2757"),
+        "iPad14,1": ("iPad mini (6th generation, Wi-Fi)", "A2567"),
+        "iPad14,2": ("iPad mini (6th generation, Cellular)", "A2568"),
+        "iPad15,7": ("iPad (A16, Wi-Fi)", "A3354"),
+        "iPad15,8": ("iPad (A16, Cellular)", "A3355"),
 
         // iPad Pro 11-inch (M1)
         // iPad13,4/5 = Wi-Fi, 8 GB / 16 GB RAM

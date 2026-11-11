@@ -38,37 +38,56 @@ enum RegionCacheMapping {
     }
 
     static func layout(plist: [String: Any], build: String, productType: String,
-                       questions: [RegionCacheQuestion]) throws -> JapanRegionCacheLayout {
-        guard productType == "iPhone18,3", build == "24B119" else {
-            throw RegionOperationError("No supported cache layout for this device/build.")
-        }
-        guard plist["CacheVersion"] as? String == build else { throw JapanRegionError.staleCache }
-        guard let uuid = (plist["CacheUUID"] as? String).flatMap(UUID.init(uuidString:)),
-              uuid.uuidString == cacheUUID else {
-            throw RegionOperationError("CacheUUID does not match the supported layout.")
+                       questions: [RegionCacheQuestion], runtime: RegionLayoutResolution = .current()) throws -> JapanRegionCacheLayout {
+        guard !build.isEmpty, plist["CacheVersion"] as? String == build else { throw JapanRegionError.staleCache }
+        guard let uuid = (plist["CacheUUID"] as? String).flatMap(UUID.init(uuidString:)) else {
+            throw RegionOperationError("Missing or invalid CacheUUID.")
         }
         guard let data = plist["CacheData"] as? Data else { throw JapanRegionError.missingCacheData }
-        guard data.count == 6480 else { throw JapanRegionError.unexpectedCacheDataSize(data.count) }
+        let resolvedSlots: [RegionCacheQuestion: Int]
+        let count: Int
+        let binding: RegionLayoutBinding?
+        switch runtime {
+        case .rejected(let reason): throw RegionOperationError(reason)
+        case .resolved(let dynamic):
+            guard dynamic.cacheUUID == uuid.uuidString, dynamic.slotCount * 9 == data.count else {
+                throw RegionOperationError("Runtime CacheUUID or CacheData length differs from the current cache.")
+            }
+            if productType == "iPhone18,3", build == "24B119" {
+                guard dynamic.cacheUUID == cacheUUID, dynamic.slotCount == 720 else {
+                    throw RegionOperationError("Dynamic layout conflicts with the device-verified static layout.")
+                }
+                try dynamic.validateStaticAgreement(slots)
+            }
+            let proof = try dynamic.binding(for: questions)
+            binding = proof; count = proof.slotCount
+            resolvedSlots = Dictionary(uniqueKeysWithValues: zip(questions, proof.descriptors.map(\.slot)))
+        case .unavailable:
+            guard productType == "iPhone18,3", build == "24B119", uuid.uuidString == cacheUUID, data.count == 6480 else {
+                throw RegionOperationError("No verified dynamic descriptor layout. Static fallback requires iPhone18,3 / 24B119 / the verified CacheUUID and length.")
+            }
+            binding = nil; count = 720; resolvedSlots = slots
+        }
         guard let extra = plist["CacheExtra"] as? [String: Any] else { throw JapanRegionError.invalidMobileGestalt }
         guard !questions.isEmpty, Set(questions).count == questions.count else { throw JapanRegionError.invalidCachePatchLayout }
         for question in questions where extra[question.key] != nil || extra[question.rawValue] != nil {
             throw RegionOperationError("CacheExtra overrides \(question.rawValue); editing its CacheData slot is blocked.")
         }
-        let layout = JapanRegionCacheLayout(size: 6480, slotCount: 720, fields: questions.map {
-            .init(question: $0.rawValue, slot: slots[$0]!, value: $0.target)
-        })
+        let layout = JapanRegionCacheLayout(size: data.count, slotCount: count, fields: questions.map {
+            .init(question: $0.rawValue, slot: resolvedSlots[$0]!, value: $0.target)
+        }, binding: binding)
         try layout.validate(data)
         return layout
     }
 
     static func assess(plist: [String: Any], build: String, writeAccess: Bool,
-                       productType: String) -> [CacheMappingAssessment] {
+                       productType: String, runtime: RegionLayoutResolution = .current()) -> [CacheMappingAssessment] {
         RegionCacheQuestion.allCases.map { question in
             do {
-                let layout = try layout(plist: plist, build: build, productType: productType, questions: [question])
+                let layout = try layout(plist: plist, build: build, productType: productType, questions: [question], runtime: runtime)
                 let value = (plist["CacheData"] as! Data)[layout.fields[0].slot * 8] == 1
                 return .init(question: question, status: writeAccess ? .writable : .readOnly,
-                    reason: writeAccess ? "Supported cache layout." : "Cache layout matches; file write access is unavailable.", cacheValue: value)
+                    reason: layout.sourceDescription + (writeAccess ? "." : "; file write access is unavailable."), cacheValue: value)
             } catch {
                 return .init(question: question, status: .unavailable, reason: error.localizedDescription, cacheValue: nil)
             }

@@ -17,6 +17,9 @@ struct RegionIdentityView: View {
                     value("ProductType", service.productType)
                     value("OS Build", service.build)
                     value("CacheUUID", service.cacheUUID)
+                    value("MobileGestalt Access", service.mobileGestaltAccess)
+                    value("CacheExtra Region Settings", service.cacheExtraSupport)
+                    value("CacheData Layout", service.cacheLayout)
                 }
                 Section("Individual Region Settings") {
                     ForEach(RegionModule.allCases.filter { $0 != .fullJapan }) { moduleRow($0) }

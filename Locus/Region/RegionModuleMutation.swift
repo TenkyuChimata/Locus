@@ -72,6 +72,7 @@ nonisolated struct RegionPatchScope: Codable, Equatable, Sendable {
     var cacheUUID: String?
     var cacheVersion: String?
     var cacheLength: Int?
+    var layoutBinding: RegionLayoutBinding?
 
     func validate(before: Data, after: Data) throws {
         guard rootKeys.isEmpty else { throw RegionOperationError("Root-key mutations are no longer supported.") }
@@ -88,6 +89,16 @@ nonisolated struct RegionPatchScope: Codable, Equatable, Sendable {
             }
         }
         if !byteOffsets.isEmpty {
+            if let binding = layoutBinding {
+                guard binding.format == "arm64-mg64-v1", binding.cacheUUID == cacheUUID.flatMap(UUID.init(uuidString:))?.uuidString,
+                      UUID(uuidString: binding.imageUUID) != nil,
+                      (1...16384).contains(binding.slotCount), cacheLength == binding.slotCount * 9,
+                      binding.descriptors.allSatisfy({ (0..<binding.slotCount).contains($0.slot) && $0.type == 11 }),
+                      Set(binding.descriptors.map { $0.slot * 8 }) == Set(byteOffsets),
+                      binding.descriptors.count == byteOffsets.count else {
+                    throw RegionOperationError("Dynamic scope binding differs from its target offsets/identity.")
+                }
+            }
             guard let da = a["CacheData"] as? Data, let db = b["CacheData"] as? Data,
                   da.count == db.count, da.count == cacheLength, da.count > 0,
                   a["CacheUUID"] as? String == cacheUUID, a["CacheVersion"] as? String == cacheVersion,
@@ -115,8 +126,6 @@ nonisolated struct RegionPatchScope: Codable, Equatable, Sendable {
     /// subsequent edits. The full original bytes are used when possible.
     func restoring(original: Data, applied: Data, current: Data) throws -> Data {
         try validate(before: original, after: applied)
-        if current == original { return current }
-        if current == applied { return original }
         let before = try RegionPlist.parse(original).root
         let expected = try RegionPlist.parse(applied).root
         let parsed = try RegionPlist.parse(current)
@@ -132,6 +141,8 @@ nonisolated struct RegionPatchScope: Codable, Equatable, Sendable {
                 throw RegionOperationError("Backup device identity differs from the current cache.")
             }
         }
+        if current == original { return current }
+        if current == applied { return original }
         var root = parsed.root
         if !extraKeys.isEmpty {
             guard var extra = root["CacheExtra"] as? [String: Any],
@@ -181,7 +192,9 @@ struct RegionWritePlan {
             let slots = da.count / 9
             rows += scope.byteOffsets.filter { $0 < slots * 8 && $0.isMultiple(of: 8) && db.indices.contains($0) }
                 .map { offset in
-                    let name = RegionCacheMapping.question(atValueOffset: offset)?.rawValue ?? "CacheData[\(offset)]"
+                    let name = scope.layoutBinding?.descriptors.first(where: { $0.slot * 8 == offset })
+                        .flatMap { descriptor in RegionCacheQuestion.allCases.first(where: { $0.key == descriptor.key })?.rawValue }
+                        ?? RegionCacheMapping.question(atValueOffset: offset)?.rawValue ?? "CacheData[\(offset)]"
                     return "\(name): \(da[offset] == 1) → \(db[offset] == 1)"
                 }
         }
@@ -191,6 +204,14 @@ struct RegionWritePlan {
 
 enum RegionModuleMutation {
     static let regionInfoKeys = ["yK+xavymRGZ3xWc1tb8XDg", "zHeENZu+wbg7PUprwNwBWg"]
+    static func validateSource(_ root: [String: Any], productType: String, build: String) throws {
+        if !build.isEmpty, root["CacheVersion"] as? String != build { throw JapanRegionError.staleCache }
+        if let cached = (root["CacheExtra"] as? [String: Any])?["0+nc/Udy4WNG8S+Q7a/s1A"] {
+            guard let cached = cached as? String,
+                  cached.split(separator: "-", maxSplits: 1).first == productType.split(separator: "-", maxSplits: 1).first,
+                  !productType.isEmpty else { throw RegionOperationError("Cached ProductType differs from the running device.") }
+        }
+    }
     static func identityKey(_ module: RegionModule, extra: [String: Any]) throws -> String {
         switch module {
         case .regionCode: return JapanRegionMutation.regionCodeKey
@@ -198,7 +219,7 @@ enum RegionModuleMutation {
         case .regionInfo:
             let existing = regionInfoKeys.filter { extra[$0] != nil }
             guard existing.count == 1 else {
-                throw RegionOperationError("Require exactly one existing RegionInfo key. Missing or dual aliases need runtime/binary semantic review; no alias will be added.")
+                throw RegionOperationError("Require exactly one existing supported RegionInfo field. The two keys are distinct RegionInfoFromSysconfig and RegionInfo queries; missing or dual fields require semantic review.")
             }
             return existing[0]
         default: throw RegionOperationError("Not a region identity field.")
@@ -206,30 +227,32 @@ enum RegionModuleMutation {
     }
 
     static func plan(module: RegionModule, raw: Data, productType: String,
-                     build: String = "") throws -> RegionWritePlan {
+                     build: String = "", runtime: RegionLayoutResolution = .current()) throws -> RegionWritePlan {
         let parsed = try RegionPlist.parse(raw)
         var root = parsed.root
+        try validateSource(root, productType: productType, build: build)
         var scope = RegionPatchScope()
         if module == .fullJapan {
             guard let profile = JapanRegionProfile.verified(for: productType) else {
                 throw JapanRegionError.unsupportedProductType(productType)
             }
-            root = try JapanRegionMutation.applying(to: parsed.root, profile: profile, build: build)
-            let layout = try JapanRegionCacheLayout.resolve(plist: parsed.root, build: build, productType: productType)
+            root = try JapanRegionMutation.applying(to: parsed.root, profile: profile, build: build, runtime: runtime)
+            let layout = try JapanRegionCacheLayout.resolve(plist: parsed.root, build: build, productType: productType, runtime: runtime)
             let extra = parsed.root["CacheExtra"] as! [String: Any]
             scope = RegionPatchScope(extraKeys: [JapanRegionMutation.regionCodeKey,
                 try identityKey(.regionInfo, extra: extra), JapanRegionMutation.regulatoryModelKey],
                 byteOffsets: layout.fields.map { $0.slot * 8 }, cacheUUID: root["CacheUUID"] as? String,
-                cacheVersion: root["CacheVersion"] as? String, cacheLength: layout.size)
+                cacheVersion: root["CacheVersion"] as? String, cacheLength: layout.size, layoutBinding: layout.binding)
         } else if let question = module.question {
             guard let data = root["CacheData"] as? Data else { throw JapanRegionError.missingCacheData }
-            let layout = try RegionCacheMapping.layout(plist: root, build: build, productType: productType, questions: [question])
+            let layout = try RegionCacheMapping.layout(plist: root, build: build, productType: productType, questions: [question], runtime: runtime)
             root["CacheData"] = try layout.applying(to: data)
             let slot = layout.fields[0].slot
             scope.byteOffsets = [slot * 8]
             scope.cacheUUID = root["CacheUUID"] as? String
             scope.cacheVersion = root["CacheVersion"] as? String
             scope.cacheLength = data.count
+            scope.layoutBinding = layout.binding
         } else {
             guard var extra = root["CacheExtra"] as? [String: Any] else { throw JapanRegionError.invalidMobileGestalt }
             let key = try identityKey(module, extra: extra)

@@ -12,10 +12,12 @@ struct JapanRegionCacheLayout {
     let size: Int
     let slotCount: Int
     let fields: [BooleanField]
+    var binding: RegionLayoutBinding? = nil
+    var sourceDescription: String { binding == nil ? "Device-verified static layout" : "Dynamically resolved descriptors and cache identity" }
 
-    static func resolve(plist: [String: Any], build: String, productType: String = "") throws -> Self {
+    static func resolve(plist: [String: Any], build: String, productType: String = "", runtime: RegionLayoutResolution = .current()) throws -> Self {
         try RegionCacheMapping.layout(plist: plist, build: build, productType: productType,
-                                      questions: RegionCacheQuestion.allCases)
+                                      questions: RegionCacheQuestion.allCases, runtime: runtime)
     }
 
     func validate(_ data: Data) throws {

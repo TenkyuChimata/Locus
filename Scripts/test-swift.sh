@@ -6,7 +6,7 @@ trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 compiler=${SWIFTC:-swiftc}
 # These sources contain the actual app planner, layout checks and transaction engine.
 # Match the Xcode target's default MainActor isolation as well as Swift 5 mode.
-set -- Locus/Region/JapanRegionProfile.swift Locus/Region/JapanRegionCacheLayout.swift \
+set -- Locus/Region/MobileGestaltRuntimeLayout.swift Locus/Region/JapanRegionProfile.swift Locus/Region/JapanRegionCacheLayout.swift \
   Locus/Region/JapanRegionMutation.swift Locus/Region/RegionCacheMapping.swift \
   Locus/Region/RegionModuleMutation.swift Locus/Region/RegionBackupDigest.swift \
   Locus/Region/RegionTransactionCoordinator.swift
@@ -19,10 +19,14 @@ set -- Locus/Region/JapanRegionProfile.swift Locus/Region/JapanRegionCacheLayout
 "$compiler" -swift-version 5 -default-isolation MainActor -warnings-as-errors -module-cache-path "$temporary/cache" \
   "$@" Tests/Layout/main.swift -o "$temporary/layout-tests"
 "$temporary/layout-tests"
+python3 Tests/Dynamic/fixtures.py "$temporary"
+"$compiler" -swift-version 5 -default-isolation MainActor -warnings-as-errors -module-cache-path "$temporary/cache" \
+  "$@" Tests/Dynamic/main.swift -o "$temporary/dynamic-tests"
+"$temporary/dynamic-tests" "$temporary"
 "$compiler" -swift-version 5 -default-isolation MainActor -warnings-as-errors -module-cache-path "$temporary/cache" \
   "$@" Locus/Diagnostics/RuntimeDiagnosticsService.swift Locus/Region/RegionIdentityService.swift Tests/Transaction/Stubs.swift \
   Tests/Transaction/main.swift -o "$temporary/service-tests"
-"$temporary/service-tests"
+"$temporary/service-tests" "$temporary"
 "$compiler" -swift-version 5 -default-isolation MainActor -warnings-as-errors -module-cache-path "$temporary/cache" \
   "$@" Tests/DeviceSnapshots/main.swift -o "$temporary/snapshot-tests"
 if [ -f iPhone17_CHA.plist ] && [ -f iPhoneSE3_JA.plist ]; then

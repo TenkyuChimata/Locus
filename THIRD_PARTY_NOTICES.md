@@ -64,8 +64,15 @@ models or backup UI. The MIT-era inherited attribution above remains intact.
   canonical valid Boolean checks, CacheExtra conflicts, one-byte edits, explicit
   preview/confirmation, full backups, readback and scoped original-value restore.
 - `RegionCacheMapping.swift` uses the Locus user's device-confirmed iPhone18,3 /
-  24B119 mapping. The former loaded-image experiment helper has been removed.
-  No upstream historical layout is imported and no PAC masking is added.
+  24B119 mapping as its strictly scoped static fallback.
+  No upstream historical layout is imported and no low-bit PAC masking is added.
+- The same pinned revision was re-read for the 2026-11-11 compatibility work,
+  including `GXMobileGestaltImage.m` and `VersionSupport.swift`. The new
+  `MobileGestaltRuntimeLayout.swift` and `MobileGestaltImage.*` use the scoped
+  loaded-section / 64-byte-descriptor idea. They independently check actual
+  table, cache reader, UUID writer/loader relationships and all three target
+  descriptors. They do not copy the upstream single-cstring-UUID inference,
+  maximum-index heuristic, low-48-bit PAC mask or historical fallback UUID.
 - Locus retains its own region UI, file coordinator, journals, backup format and
   worse_query bridge. No general editor, preset catalog, model spoofing or
   application shell is copied.

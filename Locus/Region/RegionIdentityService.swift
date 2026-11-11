@@ -45,6 +45,9 @@ final class RegionIdentityService: ObservableObject {
     @Published private(set) var comparisons: [String] = []
     @Published private(set) var build = ""
     @Published private(set) var productType = ""
+    @Published private(set) var cacheLayout = "Not verified"
+    @Published private(set) var mobileGestaltAccess = "Unavailable"
+    @Published private(set) var cacheExtraSupport = "Not verified"
     @Published private(set) var cacheUUID = "<unavailable>"
     @Published private(set) var prepared: RegionJournal?
     @Published private(set) var fullJapanState = FullJapanState.unsupported
@@ -54,15 +57,18 @@ final class RegionIdentityService: ObservableObject {
     private let backupRoot: URL?
     private let deviceID: String?
     private let fileAccess: RegionFileAccess
+    private let layoutProvider: () -> RegionLayoutResolution
     private let deviceContext: () -> (productType: String, build: String)
 
     init(backupRoot: URL? = nil, access: RegionFileAccess? = nil,
-         deviceContext: (() -> (productType: String, build: String))? = nil, deviceID: String? = nil) {
+         deviceContext: (() -> (productType: String, build: String))? = nil, deviceID: String? = nil,
+         layoutProvider: @escaping () -> RegionLayoutResolution = { .current() }) {
         #if os(iOS)
         self.deviceID = deviceID ?? UIDevice.current.identifierForVendor?.uuidString
         #else
         self.deviceID = deviceID
         #endif
+        self.layoutProvider = layoutProvider
         self.backupRoot = backupRoot
         self.fileAccess = access ?? NativeRegionFileAccess()
         self.deviceContext = deviceContext ?? { (RealDeviceIdentity.productType, MobileGestaltAccess.currentOSBuild()) }
@@ -79,7 +85,7 @@ final class RegionIdentityService: ObservableObject {
                 appropriateFor: nil, create: true).appendingPathComponent("Region Module Backups", isDirectory: true)
         }
         let context = deviceContext()
-        return .init(root: root, access: fileAccess, productType: context.productType, build: context.build, deviceID: deviceID)
+        return .init(root: root, access: fileAccess, productType: context.productType, build: context.build, deviceID: deviceID, layoutProvider: layoutProvider)
     }
 
     func refresh() {
@@ -104,7 +110,20 @@ final class RegionIdentityService: ObservableObject {
         cacheUUID = plist["CacheUUID"] as? String ?? "<unavailable>"
         let writeStatus = gestalt.cacheWriteAccessStatus()
         let writeAccess = (writeStatus["writable"] as? NSNumber)?.boolValue == true
-        let assessments = RegionCacheMapping.assess(plist: plist, build: build, writeAccess: writeAccess, productType: productType)
+        mobileGestaltAccess = writeAccess ? "Writable" : (raw == nil ? "Unavailable" : "Read-only")
+        let runtimeLayout = layoutProvider()
+        switch runtimeLayout {
+        case .resolved(let layout):
+            let uuid = (plist["CacheUUID"] as? String).flatMap(UUID.init(uuidString:))?.uuidString
+            let length = (plist["CacheData"] as? Data)?.count
+            cacheLayout = uuid == layout.cacheUUID && length == layout.slotCount * 9 && plist["CacheVersion"] as? String == build
+                ? "Dynamically resolved; per-field validation required" : "Not verified — runtime/cache identity mismatch"
+        case .rejected(let reason): cacheLayout = reason
+        case .unavailable:
+            cacheLayout = (try? RegionCacheMapping.layout(plist: plist, build: build, productType: productType,
+                questions: [.greenTea], runtime: runtimeLayout)) == nil ? "Not verified" : "Device-verified static layout"
+        }
+        let assessments = RegionCacheMapping.assess(plist: plist, build: build, writeAccess: writeAccess, productType: productType, runtime: runtimeLayout)
         var transactionStore: RegionTransactionCoordinator?
         var blocked: String?
         recoveryDetail = nil
@@ -148,7 +167,7 @@ final class RegionIdentityService: ObservableObject {
                     current = display(extra[key])
                     if module == .regionInfo { runtimeValue = display(runtime[key]) }
                     guard let raw else { throw JapanRegionError.invalidMobileGestalt }
-                    _ = try RegionModuleMutation.plan(module: module, raw: raw, productType: productType, build: build)
+                    _ = try RegionModuleMutation.plan(module: module, raw: raw, productType: productType, build: build, runtime: runtimeLayout)
                     applicable = writeAccess
                     access = writeAccess ? "Writable" : "Read-only"
                     detail += "Existing key: \(key)."
@@ -170,6 +189,8 @@ final class RegionIdentityService: ObservableObject {
                 originalAvailable: original, canApply: applicable && blocked == nil && !originalInvalid,
                 canRestore: restoreReady))
         }
+        let extraCount = statuses.filter { $0.module.question == nil && ["Writable", "Read-only"].contains($0.access) }.count
+        cacheExtraSupport = "\(extraCount)/3 fields verified"
         var fullOriginal = false, fullOriginalInvalid = false
         var fullDetail = "One MobileGestalt transaction for all six settings. File readback confirms these settings only. Restart, observe runtime answers and test affected features separately."
         do { fullOriginal = try transactionStore?.originalAvailable(for: .fullJapan) ?? false }
@@ -177,7 +198,7 @@ final class RegionIdentityService: ObservableObject {
         var fullSupported = false, fullApplied = false
         do {
             guard let raw else { throw JapanRegionError.invalidMobileGestalt }
-            let plan = try RegionModuleMutation.plan(module: .fullJapan, raw: raw, productType: productType, build: build)
+            let plan = try RegionModuleMutation.plan(module: .fullJapan, raw: raw, productType: productType, build: build, runtime: runtimeLayout)
             fullSupported = true
             fullApplied = plan.before == plan.after
         } catch { fullDetail += " " + error.localizedDescription }
@@ -192,6 +213,8 @@ final class RegionIdentityService: ObservableObject {
         else { fullJapanState = writeAccess ? .ready : .notApplied }
         if let blocked { fullDetail += " " + blocked }
         if !writeAccess { fullDetail += " " + display(writeStatus["error"]) }
+        let missing = statuses.filter { $0.access == "Unsupported" }.map { $0.module.title }
+        if !missing.isEmpty { fullDetail += " Unavailable prerequisites: " + missing.joined(separator: ", ") + "." }
         let six = statuses
         statuses.append(.init(module: .fullJapan,
             cache: six.map { "\($0.module.title): \($0.cache)" }.joined(separator: "\n"),
@@ -247,7 +270,7 @@ final class RegionIdentityService: ObservableObject {
 
     private func applyPlans(_ module: RegionModule) throws -> [RegionWritePlan] {
         let raw = try fileAccess.read(.mobileGestalt)
-        return [try RegionModuleMutation.plan(module: module, raw: raw, productType: productType, build: build)]
+        return [try RegionModuleMutation.plan(module: module, raw: raw, productType: productType, build: build, runtime: layoutProvider())]
     }
 
     func recover() { run { try coordinator().recoverPending() } }

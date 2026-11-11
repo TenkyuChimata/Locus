@@ -20,19 +20,46 @@ and test affected features separately after applying.
 
 ## Supported layouts
 
-CacheData writes and Full Japan currently support only **iPhone18,3 / iOS 27.2 /
-24B119**, CacheUUID `48CB1FAC-755B-435F-9A01-A20E5D810EA9`, CacheVersion `24B119`,
-6480 bytes (720 slots). The verified Japan model for this ProductType is `A3519`.
-The existing ProductType/model map is unchanged; it does not authorize CacheData
-writes on other models.
+Compatibility is checked per setting, independently of the marketing OS version.
+RegionCode and the single existing supported RegionInfo field require nonempty
+Strings and a cache version matching the running build, without a ProductType
+or CacheUUID allowlist. The two RegionInfo candidates represent distinct queries
+(RegionInfoFromSysconfig and RegionInfo); they are not interchangeable aliases.
+Missing or simultaneous candidates are refused. RegulatoryModelNumber additionally
+requires a verified Japanese sales model. Unknown models do not disable the
+other independent fields.
 
-The Boolean slots are green-tea 383, not-green-tea 506 and wapi 694. Each must
-contain a canonical 8-byte Boolean with validity exactly 1. Hashed or plain
-CacheExtra overrides block the corresponding slot. Only the low value byte may
-change; validity is never enabled or repaired. Unknown devices, builds, UUIDs,
-lengths, field types, invalid slots and ambiguous RegionInfo keys are refused.
-The three independent CacheExtra settings retain their existing checks without
-requiring the unrelated CacheData options to be supported.
+CacheData can use a read-only snapshot of the currently loaded system
+libMobileGestalt image. `MobileGestaltRuntimeLayout` recognizes one reviewed
+ARM64 64-byte descriptor/consumer format (`arm64-mg64-v1`). It resolves all three
+keys independently, including wapi. It checks the writer's actual descriptor
+table/count reference, cache allocation, Boolean reader and CacheUUID writer/
+loader CFString references. The runtime CacheUUID must equal the plist UUID;
+Mach-O LC_UUID is recorded separately. Slot count comes from the corroborated
+allocation and reader, not the largest plausible descriptor or plist length.
+
+This is conditional source support across models/builds, **not confirmation that
+every iOS 26/27 binary uses this format**. Changed instruction/descriptor formats,
+unavailable symbols/images, ambiguous descriptors, unresolved pointers, incorrect
+types/flags, slot collisions and mismatched cache identities are refused. A
+missing wapi descriptor disables wapi and Full Japan, while independently
+verified fields remain available. The helper copies already loaded sections
+with bounded self-task reads; it does not load a library, run a private writer,
+install hooks or modify library memory. PAC stripping uses platform instructions
+on local copies for bounded address comparison; it does not authenticate PAC or
+resolve offline shared-cache fixups. See [the compatibility review](docs/mobilegestalt-compatibility.md).
+
+The existing device-tested fallback remains restricted to **iPhone18,3 / 24B119**,
+CacheUUID `48CB1FAC-755B-435F-9A01-A20E5D810EA9`, 6480 bytes/720 slots,
+green-tea 383, not-green-tea 506 and wapi 694. A parsed dynamic result takes
+precedence; conflicts with this profile block CacheData writes. Parsing failure
+of an available image also blocks those writes. An unavailable snapshot permits
+only the original strictly matched fallback, never extrapolation to another
+model, build, UUID or length.
+
+Every target must contain a canonical 8-byte Boolean with validity exactly 1.
+Hashed or plain CacheExtra overrides block the corresponding slot. Only its low
+value byte may change; validity and all other bytes remain unchanged.
 
 Full Japan validates all six before preparing a single plan, using
 `JapanRegionMutation.applying()`. The coordinator independently checks the exact
@@ -72,6 +99,14 @@ format, not factory provenance. Preserve the app container while recovery is
 pending; export it through Xcode before reinstalling.
 
 ## Legacy backups and recovery
+
+New journals retain `schemaVersion = 2` with an optional additive
+`scope.layoutBinding` for dynamic writes. It records the descriptor format,
+image UUID, cache UUID, slot count and each selected key/index/type/flags, in
+addition to the actual low-byte offsets. Saved bindings never supply runtime
+authorization: prepare, confirmation, restore and recovery reparse current
+runtime evidence and compare it to the binding. Old offset-only CacheData scopes
+are accepted only under the original strict static profile.
 
 New journals carry `schemaVersion = 2`. Full Japan uses
 `originals/fullJapan-v2.plist`; the old `originals/fullJapan.plist` is never
@@ -124,6 +159,13 @@ Use Xcode, Developer Mode and your own signing team. The project/scheme is
 hardcoded. Register a dedicated App Group `group.<your Bundle Identifier>` and
 authorize it in the provisioning profile. Debug and Release both use
 `Locus/Locus.entitlements`.
+
+The deployment target remains iOS/iPadOS 26.0. The reviewed worse_query upstream
+advertises iOS 26.0–26.7.2 / 27.2, but marks the required SystemGroup access path
+as iOS 27. Locus does not widen that fixed path to obtain iOS 26 access. App
+launch, lease acquisition, read access, write access, CacheExtra compatibility,
+dynamic layout and Full Japan are separate capabilities; actual failures remain
+visible rather than being replaced by an OS-wide enable/disable switch.
 
 The bridge retains signed-entitlement and group-container checks. A single
 signer-remapped group is accepted; ambiguous groups require the bundle-derived

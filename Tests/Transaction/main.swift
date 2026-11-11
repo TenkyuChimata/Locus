@@ -116,5 +116,38 @@ MainActor.assumeIsolated {
     Fixture.runtimeError = false
     assert(!Fixture.queries.contains { $0.contains("RegionalBehavior") || $0.contains("SoftwareBehavior") })
     assert(Fixture.events.allSatisfy { ["readMG", "writeMG", "runtimeMG"].contains($0) })
+    // A new model/build with one missing descriptor exposes independent actions.
+    var image = try! RegionPlist.parse(Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("base.plist"))).root
+    let complete = RegionLayoutResolution.resolved(try! MobileGestaltRuntimeLayout.scan(image))
+    var sections = image["sections"] as! [[String: Any]]
+    for key in ["data", "pointers"] {
+        var data = sections[2][key] as! Data
+        data.replaceSubrange(176..<240, with: Data(repeating: 0, count: 64))
+        sections[2][key] = data
+    }
+    image["sections"] = sections
+    var dynamic = RegionLayoutResolution.resolved(try! MobileGestaltRuntimeLayout.scan(image))
+    var generic = known, genericData = Data(repeating: 0, count: 144)
+    for slot in [2,7,13] { genericData[128 + slot] = 1 }
+    genericData[16] = 1; genericData[104] = 1
+    generic["CacheData"] = genericData; generic["CacheVersion"] = "25D123"
+    generic["CacheUUID"] = "5E9DE961-58CA-4602-BB9A-576AC561936B"
+    Fixture.gestalt = try! PropertyListSerialization.data(fromPropertyList: generic, format: .binary, options: 0)
+    let flexible = RegionIdentityService(backupRoot: temporary.appendingPathComponent("dynamic"),
+        deviceContext: { ("iPad16,3-A", "25D123") }, deviceID: "dynamic-device", layoutProvider: { dynamic })
+    flexible.refresh()
+    assert(flexible.modules.filter { ![.wapi, .fullJapan].contains($0.module) }.allSatisfy(\.canApply))
+    assert(!flexible.modules.first { $0.module == .wapi }!.canApply)
+    assert(!flexible.modules.first { $0.module == .fullJapan }!.canApply)
+    assert(flexible.modules.first { $0.module == .fullJapan }!.detail.contains("wapi"))
+    assert(flexible.cacheExtraSupport == "3/3 fields verified" && flexible.mobileGestaltAccess == "Writable")
+    assert(!flexible.prepare(.fullJapan))
+    assert(flexible.prepare(.regionCode)); flexible.confirmPrepared()
+    assert(flexible.errorMessage == nil)
+    dynamic = complete; flexible.refresh()
+    assert(flexible.modules.allSatisfy(\.canApply))
+    assert(flexible.prepare(.fullJapan)); flexible.confirmPrepared()
+    assert(flexible.fullJapanState == .applied && flexible.errorMessage == nil)
+    print("PASS: dynamic service availability, missing wapi isolation, new device/build and composite apply (simulated APIs)")
     print("PASS: six individual service Apply/Restore, composite review/cancel/confirm/no-op, permissions, recovery, drift and ordinary MobileGestalt diagnostics (simulated native APIs)")
 }

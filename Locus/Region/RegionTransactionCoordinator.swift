@@ -71,10 +71,13 @@ final class RegionTransactionCoordinator {
     let productType: String
     let build: String
     private let deviceID: String?
+    private let layoutProvider: () -> RegionLayoutResolution
     private let fm = FileManager.default
 
-    init(root: URL, access: RegionFileAccess, productType: String, build: String, deviceID: String? = nil) {
+    init(root: URL, access: RegionFileAccess, productType: String, build: String, deviceID: String? = nil,
+         layoutProvider: @escaping () -> RegionLayoutResolution = { .current() }) {
         self.root = root; self.access = access; self.productType = productType; self.build = build; self.deviceID = deviceID
+        self.layoutProvider = layoutProvider
     }
 
     private func journals() throws -> [RegionJournal] {
@@ -221,6 +224,9 @@ final class RegionTransactionCoordinator {
         guard ["apply", "restore"].contains(operation) else { throw RegionOperationError("Unsupported operation.") }
         guard !productType.isEmpty, !build.isEmpty else { throw RegionOperationError("Running ProductType/build must be known before a persistent operation.") }
         guard !plans.isEmpty, Set(plans.map(\.file)).count == plans.count else { throw RegionOperationError("Missing or duplicate transaction target.") }
+        if plans.contains(where: { $0.scope.layoutBinding != nil }), deviceID?.isEmpty != false {
+            throw RegionOperationError("Dynamic transactions require a device identity.")
+        }
         try validateTargets(module: module, files: plans.map(\.file))
         let requestedFiles = Set(plans.map(\.file))
         let unfinished = try pending()
@@ -340,6 +346,7 @@ final class RegionTransactionCoordinator {
         var failures: [String] = []
         for plan in plans.reversed() {
             do {
+                try validateCachePlan(module: journal.module!, plan: plan, applying: false)
                 let current = try access.read(plan.file)
                 guard current == plan.before || current == plan.after else { throw RegionOperationError("Contents are neither the original nor the intended replacement; forced overwrite refused.") }
                 // The native idempotent path also fsyncs. Byte equality alone
@@ -366,6 +373,11 @@ final class RegionTransactionCoordinator {
     }
 
     private func checkContext(_ journal: RegionJournal) throws {
+        if journal.entries.contains(where: { $0.scope.layoutBinding != nil }) {
+            guard let savedID = journal.deviceID, !savedID.isEmpty, savedID == deviceID else {
+                throw RegionOperationError("Dynamic backup requires the same device identity; backup retained.")
+            }
+        }
         guard journal.productType == productType, journal.build == build,
               journal.deviceID == nil || journal.deviceID == deviceID else {
             throw RegionOperationError("Backup belongs to another device or build; restore is blocked.")
@@ -404,10 +416,17 @@ final class RegionTransactionCoordinator {
     /// Both apply and restore revalidate the actual plist layout. A saved byte
     /// whitelist alone never authorizes an unknown layout or another question.
     private func validateCachePlan(module: RegionModule, plan: RegionWritePlan, applying: Bool) throws {
+        let runtime = layoutProvider()
         let before = try RegionPlist.parse(plan.before).root
         let after = try RegionPlist.parse(plan.after).root
+        guard !productType.isEmpty, !build.isEmpty else { throw RegionOperationError("Running device/build identity is unavailable.") }
         for root in [before, after] {
+            try RegionModuleMutation.validateSource(root, productType: productType, build: build)
             guard let extra = root["CacheExtra"] as? [String: Any] else { throw JapanRegionError.invalidMobileGestalt }
+            if module == .regionInfo || module == .fullJapan {
+                let key = try RegionModuleMutation.identityKey(.regionInfo, extra: extra)
+                guard plan.scope.extraKeys.contains(key) else { throw RegionOperationError("RegionInfo backup selects another key.") }
+            }
             for key in plan.scope.extraKeys {
                 guard let value = extra[key] as? String, !value.isEmpty else { throw JapanRegionError.invalidMobileGestalt }
             }
@@ -416,22 +435,31 @@ final class RegionTransactionCoordinator {
             guard let profile = JapanRegionProfile.verified(for: productType) else {
                 throw JapanRegionError.unsupportedProductType(productType)
             }
-            try JapanRegionMutation.validate(plist: before, profile: profile, build: build)
-            try JapanRegionMutation.validate(plist: after, profile: profile, build: build)
-            if applying && !JapanRegionMutation.isApplied(to: after, profile: profile, build: build) {
+            try JapanRegionMutation.validate(plist: before, profile: profile, build: build, runtime: runtime)
+            try JapanRegionMutation.validate(plist: after, profile: profile, build: build, runtime: runtime)
+            if applying && !JapanRegionMutation.isApplied(to: after, profile: profile, build: build, runtime: runtime) {
                 throw RegionOperationError("Full Japan requires all six target values; partial changes are forbidden.")
             }
         }
         if applying {
-            let expected = try RegionModuleMutation.plan(module: module, raw: plan.before, productType: productType, build: build)
+            let expected = try RegionModuleMutation.plan(module: module, raw: plan.before, productType: productType, build: build, runtime: runtime)
             guard RegionPlist.equal(after, try RegionPlist.parse(expected.after).root) else {
                 throw RegionOperationError("Replacement does not equal the selected module's complete target configuration.")
             }
         }
         guard !plan.scope.byteOffsets.isEmpty else { return }
         let questions = module == .fullJapan ? RegionCacheQuestion.allCases : module.question.map { [$0] } ?? []
-        let layout = try RegionCacheMapping.layout(plist: before, build: build, productType: productType, questions: questions)
-        _ = try RegionCacheMapping.layout(plist: after, build: build, productType: productType, questions: questions)
+        let layout = try RegionCacheMapping.layout(plist: before, build: build, productType: productType, questions: questions, runtime: runtime)
+        _ = try RegionCacheMapping.layout(plist: after, build: build, productType: productType, questions: questions, runtime: runtime)
+        if let saved = plan.scope.layoutBinding {
+            guard saved == layout.binding else { throw RegionOperationError("Saved descriptor key/slot/type/flags or image/layout identity changed; backup retained.") }
+        } else {
+            // Only the original strict static profile can authorize old journals
+            // without descriptor metadata. A missing binding is never dynamic.
+            guard productType == "iPhone18,3", build == "24B119",
+                  (before["CacheUUID"] as? String).flatMap(UUID.init(uuidString:))?.uuidString == RegionCacheMapping.cacheUUID,
+                  layout.size == 6480 else { throw JapanRegionError.unverifiedCacheSemantics }
+        }
         let offsets = Set(layout.fields.map { $0.slot * 8 })
         // Accept existing journals with the older whole-Boolean/validity scope;
         // canonical Boolean and validity checks above still prevent extra edits.
