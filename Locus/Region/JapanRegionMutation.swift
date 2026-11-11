@@ -76,9 +76,6 @@ enum JapanRegionError: LocalizedError {
     case missingCacheData
     case unexpectedCacheDataSize(Int)
     case invalidCachePatchLayout
-    case activationVerificationFailed
-    case mobileGestaltVerificationFailed
-    case rollbackFailed(primary: String, rollback: String)
 
     var errorDescription: String? {
         switch self {
@@ -96,12 +93,6 @@ enum JapanRegionError: LocalizedError {
             "CacheData has an unverified size (\(size) bytes); refusing mutation."
         case .invalidCachePatchLayout:
             "The CacheData boolean slots, validity flags, or mutation bounds are invalid."
-        case .activationVerificationFailed:
-            "MobileActivation did not contain JP, J/A, and SoftwareBehaviors 25 after writing."
-        case .mobileGestaltVerificationFailed:
-            "MobileGestalt did not contain every expected Japan-region value after writing."
-        case .rollbackFailed(let primary, let rollback):
-            "The operation failed: \(primary)\nRollback also failed: \(rollback)"
         }
     }
 }

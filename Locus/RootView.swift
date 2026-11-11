@@ -1,8 +1,6 @@
 import SwiftUI
 
 struct RootView: View {
-    @EnvironmentObject private var regionService: RegionIdentityService
-
     var body: some View {
         TabView {
             RegionIdentityView()
@@ -11,13 +9,6 @@ struct RootView: View {
             RuntimeDiagnosticsView()
                 .tabItem { Label("Diagnostics", systemImage: "waveform.path.ecg") }
 
-            CoreTextGB18030View()
-                .tabItem { Label("CoreText", systemImage: "textformat") }
-        }
-        .overlay {
-            if regionService.shouldRespring {
-                RespringOverlay()
-            }
         }
     }
 }

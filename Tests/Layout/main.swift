@@ -70,19 +70,4 @@ for build in ["24A5390f", "24A446", "24C5037i", "future-build", ""] {
     assert(!JapanRegionMutation.isApplied(to: plist, profile: profile, build: build))
 }
 refuses { try JapanRegionMutation.validate(plist: [:], profile: profile, build: "future") }
-let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
-defer { try? FileManager.default.removeItem(at: directory) }
-let backups = RegionTransactionBackup(directory: directory)
-let raw = Data([0, 0xFF, 3, 0, 27, 10])
-try backups.saveMobileGestalt(raw)
-try backups.saveMobileActivation(raw.reversedData)
-let restoredGestalt = try Data(contentsOf: directory.appendingPathComponent("MobileGestalt.plist"))
-assert(restoredGestalt == raw)
-let restoredActivation = try Data(contentsOf: directory.appendingPathComponent("MobileActivation-region_info.plist"))
-assert(restoredActivation == raw.reversedData)
-print("PASS: actual layout bounds/write set/corruption checks, unknown-build rejection, profiles and exact backup files")
-
-extension Data {
-    var reversedData: Data { Data(reversed()) }
-}
+print("PASS: actual layout bounds/write set/corruption checks, unknown-build rejection and profiles")

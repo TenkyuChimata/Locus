@@ -70,7 +70,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("-Werror", script)
         self.assertIn("-fobjc-arc -fblocks -fmodules", script)
         self.assertIn("Locus/LowLevel/*.c", script)
-        self.assertIn("Locus/LowLevel/*.m Locus/CoreText/*.m Locus/Locus-Bridging-Header.h", script)
+        self.assertIn("Locus/LowLevel/*.m Locus/Locus-Bridging-Header.h", script)
         commands = "\n".join(line for line in script.splitlines() if not line.startswith("#"))
         self.assertNotIn("-framework", commands)
         self.assertNotIn("|| true", commands)

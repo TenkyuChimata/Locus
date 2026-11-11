@@ -23,17 +23,4 @@ NS_ASSUME_NONNULL_BEGIN
 FOUNDATION_EXPORT BOOL WorseQueryBridgeAvailable(void);
 FOUNDATION_EXPORT NSString * _Nullable WorseQueryAccessConfigurationError(void);
 
-//
-// Enumerate immediate children without opening the parent directory.
-//
-// The existing fsgetpath/inode discovery primitive remains independent of grants.
-//
-// Returned paths use /var/... form when fsgetpath reports /private/var/....
-//
-FOUNDATION_EXPORT NSArray<NSString *> * _Nullable
-WorseQueryListImmediateChildren(NSString *path,
-                              uint64_t maxInode,
-                              NSString * _Nullable * _Nullable error);
-
 NS_ASSUME_NONNULL_END
-

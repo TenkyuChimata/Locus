@@ -9,7 +9,6 @@
 #import <xpc/xpc.h>
 #include <assert.h>
 #include <stdio.h>
-#import "../Locus/LowLevel/MobileActivationRegionAccess.h"
 #import "../Locus/LowLevel/InPlaceFileTransaction.h"
 
 static void *TestOpen(const char *, int);
@@ -39,7 +38,7 @@ static NSURL *groupRoot;
 static BOOL containerAvailable = YES, releaseFails = NO, firstFlagFails = NO, tokenFails = NO;
 static NSUInteger created, freed, consumed, released;
 static uint64_t selectedFlags;
-static const char *testTarget = "/var/containers/Shared/SystemGroup/test/Library/Caches";
+static const char *testTarget = "/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches";
 static NSString *cachePath;
 static int cacheOpenError;
 static NSUInteger cacheOpens;
@@ -149,6 +148,8 @@ int main(void)
         NSString *path = [NSString stringWithUTF8String:testTarget];
         assert([WorseQueryLease leaseForPath:@"relative" error:&detail] == nil);
         assert([WorseQueryLease leaseForPath:@"/etc/passwd" error:&detail] == nil);
+        assert([WorseQueryLease leaseForPath:@"/var/containers/Shared/SystemGroup/test/Library/Caches" error:&detail] == nil);
+        assert([WorseQueryLease leaseForPath:[path stringByAppendingString:@"/child"] error:&detail] == nil);
         firstFlagFails = YES;
         WorseQueryLease *one = [WorseQueryLease leaseForPath:path error:&detail];
         assert(one && !detail && created == 2 && freed == 2 && consumed == 1);
@@ -268,20 +269,8 @@ int main(void)
         assert(lstat(cachePath.fileSystemRepresentation, &afterWrite) == 0 && beforeWrite.st_ino == afterWrite.st_ino);
         assert(Grants().count == 0);
 
-        MobileActivationRegionAccess *activation = MobileActivationRegionAccess.shared;
-        NSDictionary *valid = @{@"CountryCode": @"CN", @"RegionInfo": @"CH/A", @"SoftwareBehaviors": @"0x19", @"untouched": @[@1, @2]};
-        for (NSNumber *format in @[@(NSPropertyListXMLFormat_v1_0), @(NSPropertyListBinaryFormat_v1_0)]) {
-            assert([activation validateRegionData:Plist(valid, format.integerValue) error:NULL]);
-        }
-        for (id bad in @[@25, @YES, @"-1", @"4294967296", @"25x", @"", @"0x", @[], @{}]) {
-            NSMutableDictionary *invalid = [valid mutableCopy]; invalid[@"SoftwareBehaviors"] = bad;
-            assert(![activation validateRegionData:Plist(invalid, NSPropertyListBinaryFormat_v1_0) error:NULL]);
-        }
-        NSMutableDictionary *ambiguous = [valid mutableCopy]; ambiguous[@"DeviceRegionCountryCode"] = @"JP";
-        assert(![activation validateRegionData:Plist(ambiguous, NSPropertyListBinaryFormat_v1_0) error:NULL]);
-        assert(![activation validateRegionData:[@"corrupt" dataUsingEncoding:NSUTF8StringEncoding] error:NULL]);
         method_setImplementation(method, original);
         assert([NSFileManager.defaultManager removeItemAtURL:groupRoot error:NULL]);
-        puts("PASS: signing/query/token lifecycle; single-open read-only plist reads and errors; grant cleanup/retry; actual CAS and activation parser. Host simulation only.");
+        puts("PASS: signing/query/token lifecycle; single-open read-only plist reads and errors; grant cleanup/retry; actual MobileGestalt CAS. Host simulation only.");
     }
 }

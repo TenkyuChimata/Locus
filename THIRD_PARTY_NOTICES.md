@@ -23,8 +23,8 @@ respective contributions; this does not relicense an upstream project.
 - `WorseQueryWorkspace.*` is Locus's own implementation. It preserves an
   existing Caches directory by rename, restores its original inode, and
   refuses unowned links or interrupted work. It does not use upstream's
-  recursive deletion. Locus's existing bounded fsgetpath/inode discovery helper
-  remains independent of the access query; no upstream pathleak source was copied.
+  recursive deletion. The obsolete SystemGroup/inode discovery helper has been
+  removed; no upstream pathleak source is retained.
 
 ## Prior MIT-licensed Locus / GestaltEdit-derived code
 
@@ -35,8 +35,8 @@ The full original repository MIT notice is preserved verbatim in
     Copyright (c) 2026 Locus contributors
 
 The original permission and warranty clauses continue to accompany the retained
-code. In particular, in-place MobileGestalt writes and the MobileActivation
-SystemGroup/inode fallback were already present in Locus before this migration.
+code. In particular, the retained in-place MobileGestalt writer was already
+present in Locus before the worse_query migration.
 The MIT permission permits inclusion in this GPL v3 distribution; it is not
 replaced by an assertion of exclusive ownership of those earlier contributions.
 
@@ -63,25 +63,12 @@ models or backup UI. The MIT-era inherited attribution above remains intact.
   `GestaltDocument.swift` and `GestaltManager.swift` were read for layout identity,
   canonical valid Boolean checks, CacheExtra conflicts, one-byte edits, explicit
   preview/confirmation, full backups, readback and scoped original-value restore.
-- `MobileGestaltImage.m` retains the earlier adapted loaded-image section
-  selection and checked Mach VM/bounds handling. `RegionCacheMapping.swift` now
-  uses the Locus user's device-confirmed iPhone18,3 / 24B119 mapping instead of
-  descriptor scanning or independent review registries. No upstream historical
-  layout is imported and no PAC masking is added.
+- `RegionCacheMapping.swift` uses the Locus user's device-confirmed iPhone18,3 /
+  24B119 mapping. The former loaded-image experiment helper has been removed.
+  No upstream historical layout is imported and no PAC masking is added.
 - Locus retains its own region UI, file coordinator, journals, backup format and
   worse_query bridge. No general editor, preset catalog, model spoofing or
   application shell is copied.
-
-## SpringBoard refresh research
-
-`Locus/Support/RespringOverlay.swift` is unchanged by this migration. It retains
-the existing WebKit refresh technique attributed to
-[rooootdev/neospring](https://github.com/rooootdev/neospring), developed by
-neonmodder123 and ported to Swift by skadz108. The original Locus MIT notice is
-preserved for this pre-existing repository code. The referenced upstream tree
-(`3ce9c3e6c580d5ca75d985d58457688e2d14b1ac`) had no separate license file at
-review; this notice does not claim a license to copy additional upstream code.
-No additional neospring source is imported here.
 
 No new package or runtime-library dependency is added. Apple SDK/system APIs
 remain platform dependencies; this repository does not redistribute Apple's

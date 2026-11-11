@@ -9,20 +9,7 @@ clang -std=c17 -Wall -Wextra -Werror -c Locus/LowLevel/WorseQueryWorkspace.c \
 clang -std=c17 -Wall -Wextra -Werror -c Locus/LowLevel/InPlaceFileTransaction.c \
   -o "$temporary/in-place.o"
 clang -fobjc-arc -fmodules -Wall -Wextra -Werror -Wno-nullability-completeness \
-  -I Locus/LowLevel -c Locus/LowLevel/MobileGestaltImage.m \
-  -o "$temporary/image.o"
-clang -fobjc-arc -fmodules -Wall -Wextra -Werror -Wno-nullability-completeness \
   -I Locus/LowLevel -framework Foundation \
-  Tests/NativeAccessTests.m Locus/LowLevel/MobileActivationRegionAccess.m \
-  "$temporary/workspace.o" "$temporary/in-place.o" "$temporary/image.o" -o "$temporary/access-tests"
+  Tests/NativeAccessTests.m "$temporary/workspace.o" "$temporary/in-place.o" -o "$temporary/access-tests"
 "$temporary/access-tests"
-clang -fobjc-arc -fmodules -Wall -Wextra -Werror -Wno-nullability-completeness \
-  -I Locus/LowLevel -framework Foundation \
-  Tests/ActivationDiagnosticsTests.m "$temporary/in-place.o" "$temporary/image.o" \
-  -o "$temporary/activation-diagnostics-tests"
-"$temporary/activation-diagnostics-tests"
-clang -fobjc-arc -fmodules -Wall -Wextra -Werror -Wno-nullability-completeness \
-  -I Locus/LowLevel -framework Foundation Tests/MobileGestaltImageTests.m \
-  -o "$temporary/image-tests"
-"$temporary/image-tests"
 sh Scripts/test-swift.sh

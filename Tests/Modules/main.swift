@@ -19,9 +19,10 @@ let uuid = "48CB1FAC-755B-435F-9A01-A20E5D810EA9"
 let build = "24B119"
 let profile = "iPhone18,3"
 let code = JapanRegionMutation.regionCodeKey, info = RegionModuleMutation.regionInfoKeys[0]
-let modernInfo = RegionModuleMutation.regionInfoKeys[1], ai = RegionModuleMutation.intelligenceKey
+let modernInfo = RegionModuleMutation.regionInfoKeys[1]
+let ai = "A62OafQ85EJAiiqKn4agtg" // Untouched non-target sentinel.
 let model = JapanRegionMutation.regulatoryModelKey
-var baseline: [String: Any] = ["CacheExtra": [code: "CH", info: "CH/A", model: "A9999", "hardware": "preserve", "number": 512] as [String: Any],
+var baseline: [String: Any] = ["CacheExtra": [code: "CH", info: "CH/A", model: "A9999", "hardware": "preserve", "number": 512, ai: false] as [String: Any],
     "CacheUUID": uuid, "CacheVersion": build, "CacheData": Data(repeating: 0, count: 6480), "other": [1, 2, 3]]
 var baselineData = baseline["CacheData"] as! Data
 for slot in [383, 506, 694] { baselineData[5760 + slot] = 1 }
@@ -30,7 +31,7 @@ baseline["CacheData"] = baselineData
 let baselineBytes = encode(baseline)
 
 for format in [PropertyListSerialization.PropertyListFormat.xml, .binary] {
-    for module in [RegionModule.regionCode, .regionInfo, .regulatoryModel, .intelligence] {
+    for module in [RegionModule.regionCode, .regionInfo, .regulatoryModel] {
         let original = encode(baseline, format: format)
         let plan = try RegionModuleMutation.plan(module: module, raw: original, productType: profile)
         try plan.scope.validate(before: original, after: plan.after)
@@ -66,20 +67,6 @@ var identityOnly = baseline
 identityOnly.removeValue(forKey: "CacheData"); identityOnly.removeValue(forKey: "CacheUUID"); identityOnly.removeValue(forKey: "CacheVersion")
 _ = try RegionModuleMutation.plan(module: .regionCode, raw: encode(identityOnly), productType: "unknown")
 checks += 1
-for originalValue in [nil, NSNumber(value: false), NSNumber(value: true), NSNumber(value: 0), NSNumber(value: 1)] as [Any?] {
-    var fixture = baseline, fields = fixture["CacheExtra"] as! [String: Any]
-    fields[ai] = originalValue; fixture["CacheExtra"] = fields
-    let original = encode(fixture)
-    let plan = try RegionModuleMutation.plan(module: .intelligence, raw: original, productType: "unknown")
-    expect((extra(plan.after)[ai] as? NSNumber)?.intValue == 1)
-    expect(try plan.scope.restoring(original: original, applied: plan.after, current: plan.after) == original)
-}
-for bad in [NSNumber(value: 2), NSNumber(value: -1), NSNumber(value: 0.5), NSNumber(value: 1.0), "false", Data([0])] as [Any] {
-    var fixture = baseline, fields = fixture["CacheExtra"] as! [String: Any]
-    fields[ai] = bad; fixture["CacheExtra"] = fields
-    rejects { _ = try RegionModuleMutation.plan(module: .intelligence, raw: encode(fixture), productType: profile) }
-}
-
 func assess(_ fixture: [String: Any] = baseline, writable: Bool = true) -> [CacheMappingAssessment] {
     RegionCacheMapping.assess(plist: fixture, build: build, writeAccess: writable, productType: profile)
 }
@@ -153,7 +140,7 @@ func plan(_ module: RegionModule, _ bytes: Data) throws -> RegionWritePlan {
 }
 let access = MemoryAccess([.mobileGestalt: baselineBytes])
 let coordinator = store(access, "independence")
-for module in [RegionModule.regionCode, .regionInfo, .intelligence] {
+for module in [RegionModule.regionCode, .regionInfo, .regulatoryModel, .greenTea, .notGreenTea, .wapi] {
     _ = try coordinator.apply(module: module, plans: [plan(module, access.data[.mobileGestalt]!)])
 }
 let originalPointer = coordinator.root.appendingPathComponent("originals/regionCode.plist")
@@ -165,9 +152,8 @@ expect(try Data(contentsOf: originalPointer) == pointer)
 _ = try coordinator.restore(module: .regionCode)
 expect(extra(access.data[.mobileGestalt]!)[code] as? String == "CH")
 expect(extra(access.data[.mobileGestalt]!)[info] as? String == "J/A")
-expect((extra(access.data[.mobileGestalt]!)[ai] as? NSNumber)?.intValue == 1)
-_ = try coordinator.restore(module: .intelligence)
-expect(extra(access.data[.mobileGestalt]!)[ai] == nil)
+expect((extra(access.data[.mobileGestalt]!)[ai] as? NSNumber)?.boolValue == false)
+for module in [RegionModule.regulatoryModel, .greenTea, .notGreenTea, .wapi] { _ = try coordinator.restore(module: module) }
 _ = try coordinator.restore(module: .regionInfo)
 expect(RegionPlist.equal(root(access.data[.mobileGestalt]!), baseline))
 _ = try coordinator.apply(module: .regionCode, plans: [plan(.regionCode, access.data[.mobileGestalt]!)])
@@ -181,144 +167,179 @@ let manualStore = store(handEdited, "manual")
 _ = try manualStore.apply(module: .regionCode, plans: [plan(.regionCode, manual)])
 expect(!(try manualStore.originalAvailable(for: .regionCode)))
 
-let maOriginal = encode(["CountryCode": "CN", "RegionInfo": "CH/A", "SoftwareBehaviors": "321", "other": "keep"])
-let maPlan = try RegionModuleMutation.activationPlan(raw: maOriginal)
 let mgPlan = try plan(.regionCode, baselineBytes)
-// The coordinator only permits complete fixed-whitelist full plans.
-var fullOffsets: [Int] = []
-for slot in [383, 506, 694] { fullOffsets.append(slot * 8) }
-let fullScope = RegionPatchScope(extraKeys: [code, info, model], byteOffsets: fullOffsets,
-    cacheUUID: uuid, cacheVersion: build, cacheLength: 6480)
-var fullRoot = baseline
-for module in [RegionModule.regionCode, .regionInfo, .regulatoryModel] { fullRoot = root(try plan(module, encode(fullRoot)).after) }
-for module in [RegionModule.greenTea, .notGreenTea, .wapi] {
-    fullRoot = root(try RegionModuleMutation.plan(module: module, raw: encode(fullRoot), productType: profile,
-        build: build).after)
+let fullMG = try plan(.fullJapan, baselineBytes)
+expect(fullMG.file == .mobileGestalt && fullMG.comparison.count == 6)
+expect(fullMG.scope.extraKeys == [code, info, model])
+expect(Set(fullMG.scope.byteOffsets) == [3064, 4048, 5552])
+expect(JapanRegionMutation.isApplied(to: root(fullMG.after), profile: JapanRegionProfile.verified(for: profile)!, build: build))
+expect((extra(fullMG.after)[ai] as? NSNumber)?.boolValue == false)
+expect(try plan(.fullJapan, fullMG.after).after == fullMG.after)
+let fullManual = MemoryAccess([.mobileGestalt: fullMG.after])
+let fullManualStore = store(fullManual, "already-full")
+_ = try fullManualStore.apply(module: .fullJapan, plans: [plan(.fullJapan, fullMG.after)])
+expect(try fullManual.events.isEmpty && !fullManualStore.originalAvailable(for: .fullJapan))
+// Every non-target value survives, including all non-target cache bytes.
+try fullMG.scope.validate(before: baselineBytes, after: fullMG.after)
+let fullData = root(fullMG.after)["CacheData"] as! Data
+expect(baselineData.indices.allSatisfy { [3064,4048,5552].contains($0) || baselineData[$0] == fullData[$0] })
+for module in RegionModule.allCases where module != .fullJapan {
+    let onlyOne = try plan(module, baselineBytes)
+    let combinedScope = RegionWritePlan(file: .mobileGestalt, before: baselineBytes, after: onlyOne.after, scope: fullMG.scope)
+    let memory = MemoryAccess([.mobileGestalt: baselineBytes])
+    rejects { _ = try store(memory, "partial-" + module.rawValue).apply(module: .fullJapan, plans: [combinedScope]) }
+    expect(memory.events.isEmpty)
 }
-let fullMG = RegionWritePlan(file: .mobileGestalt, before: baselineBytes, after: encode(fullRoot), scope: fullScope)
-let unreviewedIO = MemoryAccess([.mobileGestalt: baselineBytes, .mobileActivation: maOriginal])
-let unreviewedStore = RegionTransactionCoordinator(root: temporary.appendingPathComponent("unreviewed-plan"),
-    access: unreviewedIO, productType: profile, build: "24B120")
-rejects { _ = try unreviewedStore.apply(module: .fullJapan, plans: [maPlan, fullMG]) }
-expect(unreviewedIO.events.isEmpty, "An unknown build cannot use a matching byte scope")
+for key in [code, info, model] {
+    var broken = baseline, fields = extra(baselineBytes); fields[key] = 1; broken["CacheExtra"] = fields
+    rejects { _ = try plan(.fullJapan, encode(broken)) }
+}
+for slot in [383,506,694] {
+    for offset in [slot * 8, slot * 8 + 1, 5760 + slot] {
+        var broken = baseline, bytes = baselineData; bytes[offset] = 2; broken["CacheData"] = bytes
+        rejects { _ = try plan(.fullJapan, encode(broken)) }
+    }
+    var broken = baseline, bytes = baselineData; bytes[5760 + slot] = 0; broken["CacheData"] = bytes
+    rejects { _ = try plan(.fullJapan, encode(broken)) }
+}
+for (key, value) in [("CacheVersion", "24B120"), ("CacheUUID", UUID().uuidString)] {
+    var broken = baseline; broken[key] = value
+    rejects { _ = try plan(.fullJapan, encode(broken)) }
+}
+for (product, version) in [("unknown", build), (profile, "24B120")] {
+    rejects { _ = try RegionModuleMutation.plan(module: .fullJapan, raw: baselineBytes, productType: product, build: version) }
+}
+for question in RegionCacheQuestion.allCases {
+    var broken = baseline, fields = extra(baselineBytes); fields[question.key] = false; broken["CacheExtra"] = fields
+    rejects { _ = try plan(.fullJapan, encode(broken)) }
+}
 let guessedIO = MemoryAccess([.mobileGestalt: baselineBytes])
-let guessedStore = store(guessedIO, "guessed-slot")
-var guessedRoot = baseline, guessedData = baseline["CacheData"] as! Data
-guessedData[2 * 8] = 1; guessedRoot["CacheData"] = guessedData
-let guessedScope = RegionPatchScope(byteOffsets: Array(16..<24) + [66],
-    cacheUUID: uuid, cacheVersion: build, cacheLength: 6480)
+var guessedRoot = baseline, guessedData = baselineData
+guessedData[16] = 1; guessedRoot["CacheData"] = guessedData
+let guessedScope = RegionPatchScope(byteOffsets: Array(16..<24) + [66], cacheUUID: uuid, cacheVersion: build, cacheLength: 6480)
 let guessedPlan = RegionWritePlan(file: .mobileGestalt, before: baselineBytes, after: encode(guessedRoot), scope: guessedScope)
-rejects { _ = try guessedStore.apply(module: .greenTea, plans: [guessedPlan]) }
-expect(guessedIO.events.isEmpty, "A known layout cannot authorize another slot's plan")
-let incompleteIO = MemoryAccess([.mobileGestalt: baselineBytes, .mobileActivation: maOriginal])
+rejects { _ = try store(guessedIO, "guessed").apply(module: .greenTea, plans: [guessedPlan]) }
+let incompleteIO = MemoryAccess([.mobileGestalt: baselineBytes])
 let incompleteStore = store(incompleteIO, "incomplete-full")
-rejects { _ = try incompleteStore.apply(module: .fullJapan, plans: [maPlan]) }
-rejects { _ = try incompleteStore.apply(module: .fullJapan, plans: [fullMG]) }
-rejects { _ = try incompleteStore.apply(module: .regionCode, plans: [maPlan]) }
+rejects { _ = try incompleteStore.apply(module: .fullJapan, plans: [mgPlan]) }
+rejects { _ = try incompleteStore.apply(module: .fullJapan, plans: [fullMG, fullMG]) }
+rejects { _ = try incompleteStore.apply(module: .regionCode, plans: [fullMG]) }
 expect(incompleteIO.events.isEmpty)
 let noContextStore = RegionTransactionCoordinator(root: incompleteStore.root, access: incompleteIO, productType: "", build: "")
 rejects { _ = try noContextStore.apply(module: .regionCode, plans: [mgPlan]) }
-for fault in 0..<4 {
-    let memory = MemoryAccess([.mobileGestalt: baselineBytes, .mobileActivation: maOriginal])
+for fault in 0..<3 {
+    let memory = MemoryAccess([.mobileGestalt: baselineBytes])
     let transaction = store(memory, "fault\(fault)")
     var injected = false
     memory.callback = { file, _, replacement, io in
         let pending = try transaction.pending().first!
+        expect(pending.entries.count == 1)
         expect(pending.phase == .writing || injected)
-        for entry in pending.entries {
-            let directory = transaction.root.appendingPathComponent(pending.id)
-            let before = try Data(contentsOf: directory.appendingPathComponent(entry.file.rawValue + ".before.plist"))
-            expect(RegionBackupDigest.sha256(before) == entry.beforeSHA256)
-        }
-        // Both original files and their checksums exist before any write.
-        if !injected && fault != 0 && file == (fault == 1 ? .mobileActivation : .mobileGestalt) {
+        let before = try Data(contentsOf: transaction.root.appendingPathComponent(pending.id).appendingPathComponent("mobileGestalt.before.plist"))
+        expect(before == (pending.operation == "apply" ? baselineBytes : fullMG.after))
+        if !injected && fault != 0 {
             injected = true
-            if fault == 3 { io.data[file] = Data([1,2,3]) } // Unrecognized torn bytes: refuse forced recovery.
-            else { io.data[file] = replacement }
+            io.data[file] = fault == 2 ? Data([1,2,3]) : replacement
             throw RegionOperationError("injected write failure")
         }
         io.data[file] = replacement
     }
     if fault == 0 {
-        _ = try transaction.apply(module: .fullJapan, plans: [maPlan, fullMG])
-        expect(memory.events == [.mobileActivation, .mobileGestalt])
+        _ = try transaction.apply(module: .fullJapan, plans: [fullMG])
+        expect(memory.events == [.mobileGestalt])
         expect(try transaction.pending().isEmpty)
+        let pointerURL = transaction.root.appendingPathComponent("originals/fullJapan-v2.plist")
+        let pointer = try Data(contentsOf: pointerURL)
+        _ = try transaction.apply(module: .fullJapan, plans: [plan(.fullJapan, memory.data[.mobileGestalt]!)])
+        expect(try memory.events.count == 1 && Data(contentsOf: pointerURL) == pointer)
         _ = try transaction.restore(module: .fullJapan)
-        expect(memory.data[.mobileGestalt] == baselineBytes && memory.data[.mobileActivation] == maOriginal)
+        expect(memory.data[.mobileGestalt] == baselineBytes)
     } else {
-        rejects { _ = try transaction.apply(module: .fullJapan, plans: [maPlan, fullMG]) }
-        expect(memory.data[.mobileActivation] == maOriginal)
-        if fault == 3 {
+        rejects { _ = try transaction.apply(module: .fullJapan, plans: [fullMG]) }
+        if fault == 2 {
             expect(try transaction.pending().first?.phase == .recoveryRequired)
             rejects { _ = try transaction.apply(module: .regionCode, plans: [mgPlan]) }
             rejects { _ = try store(memory, "fault\(fault)").recoverPending() }
         } else {
             expect(memory.data[.mobileGestalt] == baselineBytes)
             expect(try transaction.pending().isEmpty)
-            expect(memory.events == (fault == 1 ? [.mobileActivation,.mobileActivation] : [.mobileActivation,.mobileGestalt,.mobileGestalt,.mobileActivation]))
+            expect(memory.events == [.mobileGestalt,.mobileGestalt])
         }
     }
 }
-
 for finalRead in [false, true] {
-    let memory = MemoryAccess([.mobileGestalt: baselineBytes, .mobileActivation: maOriginal])
+    let memory = MemoryAccess([.mobileGestalt: baselineBytes])
     let transaction = store(memory, "read-fault-\(finalRead)")
-    var injected = false
-    memory.readFault = { file, io in
-        if !injected && io.events.count == (finalRead ? 2 : 1) && file == .mobileActivation {
-            injected = true
-            throw RegionOperationError("injected verification read failure")
+    var reads = 0, injected = false
+    memory.readFault = { _, io in
+        if !injected && io.events.count == 1 {
+            reads += 1
+            if reads == (finalRead ? 2 : 1) { injected = true; throw RegionOperationError("injected verification read failure") }
         }
     }
-    rejects { _ = try transaction.apply(module: .fullJapan, plans: [maPlan, fullMG]) }
-    expect(memory.data[.mobileGestalt] == baselineBytes && memory.data[.mobileActivation] == maOriginal)
+    rejects { _ = try transaction.apply(module: .fullJapan, plans: [fullMG]) }
+    expect(memory.data[.mobileGestalt] == baselineBytes)
     expect(try transaction.pending().isEmpty)
 }
-let failedRollbackIO = MemoryAccess([.mobileGestalt: baselineBytes, .mobileActivation: maOriginal])
+let failedRollbackIO = MemoryAccess([.mobileGestalt: baselineBytes])
 let failedRollbackStore = store(failedRollbackIO, "rollback-failure")
 failedRollbackIO.callback = { file, _, replacement, io in
-    if io.events.count == 3 { throw RegionOperationError("injected rollback failure") }
+    if io.events.count == 2 { throw RegionOperationError("injected rollback failure") }
     io.data[file] = replacement
-    if io.events.count == 2 { throw RegionOperationError("injected failure after second write") }
+    throw RegionOperationError("injected failure after write")
 }
-rejects { _ = try failedRollbackStore.apply(module: .fullJapan, plans: [maPlan, fullMG]) }
+rejects { _ = try failedRollbackStore.apply(module: .fullJapan, plans: [fullMG]) }
 expect(try failedRollbackStore.pending().first?.phase == .recoveryRequired)
-expect(failedRollbackIO.data[.mobileActivation] == maOriginal)
 failedRollbackIO.callback = nil
 _ = try store(failedRollbackIO, "rollback-failure").recoverPending()
 expect(failedRollbackIO.data[.mobileGestalt] == baselineBytes)
-
-// If commit/rollback-intent metadata becomes unwritable after both sources are
-// verified, preserve the complete intended state instead of starting an
-// unjournaled partial rollback. Corrupt metadata then blocks further writes.
-let metadataIO = MemoryAccess([.mobileGestalt: baselineBytes, .mobileActivation: maOriginal])
+// A failed commit/rollback-intent save retains the verified replacement and blocks further writes.
+let metadataIO = MemoryAccess([.mobileGestalt: baselineBytes])
 let metadataStore = store(metadataIO, "metadata-failure")
 metadataIO.callback = { file, _, replacement, io in
     io.data[file] = replacement
-    if io.events.count == 2 {
-        let pending = try metadataStore.pending().first!
-        let path = metadataStore.root.appendingPathComponent(pending.id).appendingPathComponent("journal.plist")
-        try FileManager.default.removeItem(at: path)
-        try FileManager.default.createDirectory(at: path, withIntermediateDirectories: false)
-    }
+    let pending = try metadataStore.pending().first!
+    let path = metadataStore.root.appendingPathComponent(pending.id).appendingPathComponent("journal.plist")
+    try FileManager.default.removeItem(at: path)
+    try FileManager.default.createDirectory(at: path, withIntermediateDirectories: false)
 }
-rejects { _ = try metadataStore.apply(module: .fullJapan, plans: [maPlan, fullMG]) }
-expect(metadataIO.events == [.mobileActivation, .mobileGestalt])
-expect(metadataIO.data[.mobileGestalt] == fullMG.after && metadataIO.data[.mobileActivation] == maPlan.after)
+rejects { _ = try metadataStore.apply(module: .fullJapan, plans: [fullMG]) }
+expect(metadataIO.events == [.mobileGestalt] && metadataIO.data[.mobileGestalt] == fullMG.after)
 rejects { _ = try metadataStore.pending() }
 rejects { _ = try metadataStore.apply(module: .regionCode, plans: [plan(.regionCode, metadataIO.data[.mobileGestalt]!)]) }
 
-// An unfinished standalone MA transaction cannot hold unrelated MG modules hostage.
-let isolatedIO = MemoryAccess([.mobileGestalt: baselineBytes, .mobileActivation: maOriginal])
-let isolatedStore = store(isolatedIO, "isolated-pending")
-isolatedIO.callback = { file, _, _, io in
-    io.data[file] = Data([9,9]); throw RegionOperationError("injected torn MA write")
+// Full Restore retains unrelated later root, extra and data changes.
+let scopedIO = MemoryAccess([.mobileGestalt: baselineBytes]), scopedStoreName = "full-scoped"
+let scopedStore = store(scopedIO, scopedStoreName)
+_ = try scopedStore.apply(module: .fullJapan, plans: [fullMG])
+var scopedRoot = root(scopedIO.data[.mobileGestalt]!), scopedExtra = extra(scopedIO.data[.mobileGestalt]!)
+scopedExtra["hardware"] = "external-value"; scopedRoot["CacheExtra"] = scopedExtra
+scopedRoot["other"] = "external-root"
+var scopedData = fullData; scopedData[56] = 123; scopedRoot["CacheData"] = scopedData
+scopedIO.data[.mobileGestalt] = encode(scopedRoot)
+_ = try scopedStore.restore(module: .fullJapan)
+let scopedRestored = root(scopedIO.data[.mobileGestalt]!), scopedRestoredExtra = extra(scopedIO.data[.mobileGestalt]!)
+expect(scopedRestoredExtra["hardware"] as? String == "external-value" && scopedRestored["other"] as? String == "external-root")
+expect([code,info,model].allSatisfy { RegionPlist.equal(scopedRestoredExtra[$0], extra(baselineBytes)[$0]) })
+let scopedRestoredData = scopedRestored["CacheData"] as! Data
+expect(scopedRestoredData[56] == 123 && [3064,4048,5552].allSatisfy { scopedRestoredData[$0] == baselineData[$0] })
+// Target edits, UUID/version changes and backup corruption block Full Restore.
+for key in [code, "CacheUUID", "CacheVersion"] {
+    var changed = root(fullMG.after)
+    if key == code { var fields = extra(fullMG.after); fields[code] = "LL"; changed["CacheExtra"] = fields }
+    else { changed[key] = "external" }
+    scopedIO.data[.mobileGestalt] = encode(changed)
+    let writes = scopedIO.events.count
+    rejects { _ = try scopedStore.restore(module: .fullJapan) }
+    expect(scopedIO.events.count == writes)
 }
-rejects { _ = try isolatedStore.apply(module: .mobileActivation, plans: [maPlan]) }
-isolatedIO.callback = nil
-_ = try isolatedStore.apply(module: .regionCode, plans: [mgPlan])
-expect(isolatedIO.data[.mobileGestalt] == mgPlan.after)
-expect(try isolatedStore.pending().count == 1)
+scopedIO.data[.mobileGestalt] = baselineBytes
+let fullReview = try scopedStore.prepare(module: .fullJapan, plans: [fullMG])!
+try Data([9]).write(to: scopedStore.root.appendingPathComponent(fullReview.id).appendingPathComponent("mobileGestalt.after.plist"))
+let writesBeforeCorruption = scopedIO.events.count
+rejects { _ = try scopedStore.commitPrepared(fullReview.id) }
+expect(scopedIO.events.count == writesBeforeCorruption)
+_ = try scopedStore.recoverPending()
 
 let driftIO = MemoryAccess([.mobileGestalt: baselineBytes])
 let driftStore = store(driftIO, "target-drift")
@@ -332,6 +353,11 @@ rejects { _ = try driftStore.restore(module: .regionCode) }
 expect(driftIO.events.count == driftWrites)
 let wrongBuild = RegionTransactionCoordinator(root: driftStore.root, access: driftIO, productType: profile, build: "other-build")
 rejects { _ = try wrongBuild.originalAvailable(for: .regionCode) }
+for key in ["CacheUUID", "CacheVersion"] {
+    var changed = root(mgPlan.after); changed[key] = "external"
+    driftIO.data[.mobileGestalt] = encode(changed)
+    rejects { _ = try driftStore.restore(module: .regionCode) }
+}
 
 // Relaunch after termination between system write and durable commit.
 let crashIO = MemoryAccess([.mobileGestalt: baselineBytes])

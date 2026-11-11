@@ -30,11 +30,8 @@
 #import "WorseQueryWorkspace.h"
 #import <dlfcn.h>
 #import <errno.h>
-#import <limits.h>
 #import <stdlib.h>
 #import <string.h>
-#import <sys/fsgetpath.h>
-#import <sys/mount.h>
 #import <sys/stat.h>
 #import <xpc/xpc.h>
 
@@ -234,8 +231,8 @@ static int64_t Acquire(NSString *target, NSString *group, NSString **detail)
         }
         NSString *normalized = path.stringByStandardizingPath;
         if ([normalized hasPrefix:@"/private/var/"]) normalized = [normalized substringFromIndex:8];
-        if (![normalized hasPrefix:@"/var/containers/Shared/SystemGroup/"]) {
-            if (error) *error = @"worse_query target is outside Locus's SystemGroup access scope.";
+        if (![normalized isEqualToString:@"/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches"]) {
+            if (error) *error = @"worse_query target is outside Locus's fixed MobileGestalt cache directory.";
             return nil;
         }
         WorseQueryGrant *grant = Grants()[normalized];
@@ -282,117 +279,3 @@ static int64_t Acquire(NSString *target, NSString *group, NSString **detail)
 }
 - (void)dealloc { [self invalidate]; }
 @end
-
-NSArray<NSString *> *
-WorseQueryListImmediateChildren(NSString *path,
-                              uint64_t maxInode,
-                              NSString **error)
-{
-    if (!path.isAbsolutePath) {
-        if (error) *error = @"inode discovery requires an absolute path";
-        return nil;
-    }
-
-    if (maxInode == 0) {
-        if (error) *error = @"inode discovery requires maxInode > 0";
-        return nil;
-    }
-
-    //
-    // Match upstream inode discovery behavior: fsgetpath commonly returns
-    // /private/var/... while callers use /var/..., so normalize the root to
-    // /var/... before comparing.
-    //
-    NSString *normalizedRoot = path.stringByStandardizingPath;
-    if ([normalizedRoot hasPrefix:@"/private/var/"]) {
-        NSString *suffix =
-            [normalizedRoot substringFromIndex:[@"/private/var/" length]];
-        normalizedRoot =
-            [@"/var/" stringByAppendingString:suffix];
-    }
-
-    struct statfs sfs;
-    if (statfs(path.fileSystemRepresentation, &sfs) != 0) {
-        if (error) {
-            *error = [NSString stringWithFormat:
-                @"inode discovery statfs failed for %@ (errno=%d: %s)",
-                path,
-                errno,
-                strerror(errno)];
-        }
-        return nil;
-    }
-
-    fsid_t fsid = sfs.f_fsid;
-    if ([normalizedRoot isEqualToString:@"/var"] || [normalizedRoot isEqualToString:@"/private/var"]) normalizedRoot = @"/var";
-    const char *root = normalizedRoot.fileSystemRepresentation;
-    size_t rootLength = strlen(root);
-
-    NSMutableOrderedSet<NSString *> *children =
-        [NSMutableOrderedSet orderedSet];
-
-    char buffer[PATH_MAX];
-
-    //
-    // This is intentionally the same primitive as the existing inode discovery helper:
-    // walk inode numbers and resolve them with fsgetpath instead of trying
-    // to open/enumerate the protected parent directory.
-    //
-    for (uint64_t inode = 1; inode <= maxInode && inode != 0; inode++) {
-        ssize_t length =
-            fsgetpath(buffer, sizeof(buffer), &fsid, inode);
-
-        if (length <= 0) {
-            continue;
-        }
-
-        //
-        // fsgetpath returns a C path. Be defensive about termination even
-        // though the upstream implementation can use it directly.
-        //
-        if ((size_t)length < sizeof(buffer)) {
-            buffer[length] = '\0';
-        } else {
-            buffer[sizeof(buffer) - 1] = '\0';
-        }
-
-        const char *candidate = buffer;
-
-        //
-        // "/private/var/..." -> "/var/..."
-        //
-        if (strncmp(candidate, "/private/var/", 13) == 0) {
-            candidate += 8;
-        }
-
-        if (strncmp(candidate, root, rootLength) != 0 ||
-            candidate[rootLength] != '/') {
-            continue;
-        }
-
-        const char *child =
-            candidate + rootLength + 1;
-
-        if (*child == '\0') {
-            continue;
-        }
-
-        //
-        // Immediate child only.
-        //
-        if (strchr(child, '/') != NULL) {
-            continue;
-        }
-
-        NSString *resolved =
-            [NSString stringWithUTF8String:candidate];
-
-        if (resolved.length > 0) {
-            [children addObject:resolved];
-        }
-    }
-
-    if (error) *error = nil;
-    return children.array;
-}
-

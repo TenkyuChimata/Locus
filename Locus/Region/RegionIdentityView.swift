@@ -18,29 +18,20 @@ struct RegionIdentityView: View {
                     value("OS Build", service.build)
                     value("CacheUUID", service.cacheUUID)
                 }
-                Section("Japan Region Identity") {
-                    value("Six-field Acceptance", service.identityMatches ? "Values Match — Restart / Functions Not Verified" : "Not Verified / Values Differ")
-                    ForEach([RegionModule.regionCode, .regionInfo, .regulatoryModel, .greenTea, .notGreenTea, .wapi]) { moduleRow($0) }
+                Section("Individual Region Settings") {
+                    ForEach(RegionModule.allCases.filter { $0 != .fullJapan }) { moduleRow($0) }
                 }
-                Section("Japan RegionalBehavior") {
-                    RegionalBehaviorDiagnosticsContent(service: service.regionalDiagnostics, productType: service.productType,
-                        build: service.build, activationRows: service.activationSourceDiagnostics)
-                }
-                moduleSection("Additional Capabilities", [.intelligence])
-                Section {
-                    Button("Refresh MobileActivation Research") { service.refreshResearch() }
-                        .disabled(service.isBusy)
-                    moduleRow(.mobileActivation)
-                    NavigationLink("CoreText GB18030 Experiment") { CoreTextGB18030View() }
-                    Text("CoreText normally reads RegionalBehaviorGB18030 and caches it with dispatch_once. The experiment is limited to Locus; Locale CN can also affect glyphs. A false MG value does not guarantee every glyph renders normally. Unreviewed binaries remain blocked.")
-                        .font(.caption).foregroundStyle(.secondary)
-                } header: { Text("Advanced Research") }
                 moduleSection("Full Japan Region", [.fullJapan])
                 if let detail = service.recoveryDetail {
-                    Section("Unfinished Transaction") {
+                    Section("Recovery") {
                         Text(detail).font(.caption.monospaced()).textSelection(.enabled)
                         Button("Recover and Verify Original Bytes", role: .destructive) { service.recover() }
                             .disabled(service.isBusy)
+                    }
+                }
+                if let detail = service.legacyBackupDetail {
+                    Section("Legacy Backups") {
+                        Text(detail).font(.caption).textSelection(.enabled)
                     }
                 }
                 if !service.comparisons.isEmpty {
@@ -71,7 +62,7 @@ struct RegionIdentityView: View {
                         Section("Changes") {
                             ForEach(service.comparisons, id: \.self) { Text($0).font(.caption).textSelection(.enabled) }
                         }
-                        Text("Original backup saved and verified. Only the selected fields will change. Restore preserves unrelated changes.")
+                        Text("Transaction backups saved and verified. Only the selected fields will change. Restore preserves unrelated changes.")
                             .font(.caption)
                         Text("In-place writes are not crash or power-loss atomic.").font(.caption).foregroundStyle(.secondary)
                         Button(pending.restore ? "Restore" : "Apply", role: .destructive) {
@@ -95,14 +86,12 @@ struct RegionIdentityView: View {
                 Text(module.title).font(.headline)
                 value("Current", status.cache)
                 value("Target", status.expected)
-                value("Modification", status.access)
+                value("Access Status", status.access)
                 value("Verification", status.verification)
                 HStack {
-                    if module != .fullJapan {
-                        Button("Review Changes") {
-                            if service.prepare(module) { action = .init(module: module, restore: false) }
-                        }.disabled(service.isBusy || !status.canApply)
-                    }
+                    Button("Review Changes") {
+                        if service.prepare(module) { action = .init(module: module, restore: false) }
+                    }.disabled(service.isBusy || !status.canApply)
                     Spacer()
                     Button("Restore") {
                         if service.prepare(module, restore: true) { action = .init(module: module, restore: true) }
@@ -112,13 +101,6 @@ struct RegionIdentityView: View {
                     value("Runtime", status.runtime)
                     value("Original Backup", status.originalAvailable ? "Available" : "Not yet saved")
                     Text(status.detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                    if module == .mobileActivation {
-                        DisclosureGroup("Access Diagnostics") {
-                            ForEach(service.activationDiagnostics) { row in
-                                value(row.title, row.value)
-                            }
-                        }
-                    }
                 }
             }
         } else { Text(module.title).foregroundStyle(.secondary) }

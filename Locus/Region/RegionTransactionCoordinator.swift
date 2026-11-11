@@ -19,13 +19,21 @@ nonisolated struct RegionJournal: Codable, Sendable {
         var unfinished: Bool { self != .committed && self != .rolledBack }
     }
     nonisolated struct Entry: Codable, Sendable {
-        let file: RegionFile
+        // Preserve obsolete names as metadata, never as a file-access capability.
+        let fileName: String
+        var file: RegionFile? { RegionFile(rawValue: fileName) }
         let beforeSHA256: String
         let afterSHA256: String
         let scope: RegionPatchScope
+        enum CodingKeys: String, CodingKey { case fileName = "file", beforeSHA256, afterSHA256, scope }
+        init(file: RegionFile, beforeSHA256: String, afterSHA256: String, scope: RegionPatchScope) {
+            fileName = file.rawValue; self.beforeSHA256 = beforeSHA256; self.afterSHA256 = afterSHA256; self.scope = scope
+        }
     }
+    let schemaVersion: Int? // Absent in v1. New Full Japan always requires v2.
     let id: String
-    let module: RegionModule
+    let moduleName: String
+    var module: RegionModule? { RegionModule(rawValue: moduleName) }
     let operation: String
     let productType: String
     let build: String
@@ -33,6 +41,24 @@ nonisolated struct RegionJournal: Codable, Sendable {
     let created: Date
     let entries: [Entry]
     var phase: Phase
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, id, moduleName = "module", operation, productType, build, deviceID, created, entries, phase
+    }
+    init(id: String, module: RegionModule, operation: String, productType: String, build: String,
+         deviceID: String?, created: Date, entries: [Entry], phase: Phase) {
+        schemaVersion = 2; self.id = id; moduleName = module.rawValue; self.operation = operation
+        self.productType = productType; self.build = build; self.deviceID = deviceID
+        self.created = created; self.entries = entries; self.phase = phase
+    }
+
+    var permitsCurrentRecovery: Bool {
+        guard let module, ["apply", "restore"].contains(operation),
+              entries.count == 1, entries[0].file == .mobileGestalt else { return false }
+        return schemaVersion == 2 || (schemaVersion == nil && module != .fullJapan)
+    }
+    var legacyBlock: String {
+        "Legacy or unsupported transaction \(id) (\(moduleName), schema \(schemaVersion.map(String.init) ?? "1"), \(phase.rawValue)). No automatic restore is authorized. Preserve this app container and its original backups for manual recovery review."
+    }
 }
 
 /// Every persistent module (including the composite) enters this coordinator.
@@ -51,7 +77,7 @@ final class RegionTransactionCoordinator {
         self.root = root; self.access = access; self.productType = productType; self.build = build; self.deviceID = deviceID
     }
 
-    func pending() throws -> [RegionJournal] {
+    private func journals() throws -> [RegionJournal] {
         Self.serial.lock(); defer { Self.serial.unlock() }
         guard fm.fileExists(atPath: root.path) else { return [] }
         return try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
@@ -62,9 +88,50 @@ final class RegionTransactionCoordinator {
                 guard fm.fileExists(atPath: path.path) else { return nil }
                 let journal = try decode(RegionJournal.self, at: path)
                 guard journal.id == directory.lastPathComponent else { throw RegionOperationError("Journal identity mismatch.") }
-                if journal.phase.unfinished { try validateTargets(module: journal.module, files: journal.entries.map(\.file)) }
-                return journal.phase.unfinished ? journal : nil
+                return journal
             }.sorted { $0.created < $1.created }
+    }
+
+    func pending() throws -> [RegionJournal] {
+        try journals().filter { $0.phase.unfinished }
+    }
+
+    /// Read app-owned metadata/backups only. Never opens obsolete system paths.
+    func legacyBackupDetail() throws -> String? {
+        Self.serial.lock(); defer { Self.serial.unlock() }
+        var lines = try journals().filter { !$0.permitsCurrentRecovery }.map(\.legacyBlock)
+        if fm.fileExists(atPath: root.deletingLastPathComponent().appendingPathComponent("Japan Region Transaction Backups").path) {
+            lines.append("Older Japan Region Transaction Backups folder retained. Its unjournaled backups cannot authorize current Restore; preserve them for manual recovery review.")
+        }
+        for name in ["fullJapan", "mobileActivation", "intelligence"] {
+            let url = root.appendingPathComponent("originals/\(name).plist")
+            guard fm.fileExists(atPath: url.path) else { continue }
+            do {
+                let pointer = try decode([String: String].self, at: url)
+                guard let id = pointer["transaction"], UUID(uuidString: id) != nil else {
+                    throw RegionOperationError("Invalid original pointer.")
+                }
+                let journal = try decode(RegionJournal.self, at: root.appendingPathComponent(id).appendingPathComponent("journal.plist"))
+                guard journal.id == id, journal.moduleName == name, journal.operation == "apply" else {
+                    throw RegionOperationError("Original record mismatch.")
+                }
+                for entry in journal.entries {
+                    // Obsolete file labels are used only for these fixed local backup names.
+                    guard ["mobileGestalt", "mobileActivation"].contains(entry.fileName) else {
+                        throw RegionOperationError("Unknown legacy backup label.")
+                    }
+                    let directory = root.appendingPathComponent(id)
+                    let before = try Data(contentsOf: directory.appendingPathComponent("\(entry.fileName).before.plist"))
+                    let after = try Data(contentsOf: directory.appendingPathComponent("\(entry.fileName).after.plist"))
+                    guard RegionBackupDigest.sha256(before) == entry.beforeSHA256,
+                          RegionBackupDigest.sha256(after) == entry.afterSHA256 else {
+                        throw RegionOperationError("Legacy backup checksum mismatch.")
+                    }
+                }
+                lines.append("Legacy \(name) original retained (\(id)); excluded from current Restore and new Full Japan baselines.")
+            } catch { lines.append("Legacy \(name) backup unavailable: \(error.localizedDescription) Original data retained; automatic restore blocked.") }
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 
     func originalAvailable(for module: RegionModule) throws -> Bool {
@@ -75,7 +142,7 @@ final class RegionTransactionCoordinator {
         return true
     }
 
-    static let unchangedMessage = "Already at the requested persistent value. No write or original-value claim was made."
+    static let unchangedMessage = "No Changes Needed. Requested file values already match; no write or new original backup was created."
 
     @discardableResult
     func apply(module: RegionModule, plans: [RegionWritePlan]) throws -> String {
@@ -116,6 +183,7 @@ final class RegionTransactionCoordinator {
         guard UUID(uuidString: id) != nil else { throw RegionOperationError("Invalid prepared transaction.") }
         let journal = try decode(RegionJournal.self, at: root.appendingPathComponent(id).appendingPathComponent("journal.plist"))
         try checkContext(journal)
+        try checkSupported(journal)
         guard journal.id == id, journal.phase == .prepared, ["apply", "restore"].contains(journal.operation) else {
             throw RegionOperationError("Transaction is no longer awaiting confirmation.")
         }
@@ -125,6 +193,8 @@ final class RegionTransactionCoordinator {
     func recoverPending() throws -> String {
         Self.serial.lock(); defer { Self.serial.unlock() }
         let journals = try pending()
+        // Validate the whole recovery set before even closing an unwritten one.
+        for journal in journals { try checkSupported(journal); try checkContext(journal) }
         var unwritten = 0
         var recovered = 0
         for var journal in journals.reversed() {
@@ -153,7 +223,9 @@ final class RegionTransactionCoordinator {
         guard !plans.isEmpty, Set(plans.map(\.file)).count == plans.count else { throw RegionOperationError("Missing or duplicate transaction target.") }
         try validateTargets(module: module, files: plans.map(\.file))
         let requestedFiles = Set(plans.map(\.file))
-        guard try pending().allSatisfy({ requestedFiles.isDisjoint(with: $0.entries.map(\.file)) }) else {
+        let unfinished = try pending()
+        for journal in unfinished where !journal.permitsCurrentRecovery { throw RegionOperationError(journal.legacyBlock) }
+        guard unfinished.allSatisfy({ requestedFiles.isDisjoint(with: $0.entries.compactMap(\.file)) }) else {
             throw RegionOperationError("Unfinished transaction detected for this source. Recover it before modifying the same file.")
         }
         for plan in plans {
@@ -198,8 +270,12 @@ final class RegionTransactionCoordinator {
     func commitPrepared(_ id: String) throws -> String {
         Self.serial.lock(); defer { Self.serial.unlock() }
         var journal = try preparedJournal(id)
+        for other in try pending() where other.id != id {
+            try checkSupported(other)
+            throw RegionOperationError("Another unfinished MobileGestalt transaction appeared after review; confirmation refused.")
+        }
         let plans = try self.plans(in: journal)
-        let module = journal.module, operation = journal.operation
+        let module = journal.module!, operation = journal.operation
         var attempted: [RegionWritePlan] = []
         do {
             // Check every source again after backup I/O and before the first write.
@@ -278,6 +354,9 @@ final class RegionTransactionCoordinator {
     }
 
     private func original(_ module: RegionModule) throws -> RegionJournal {
+        guard fm.fileExists(atPath: originalURL(module).path) else {
+            throw RegionOperationError("No compatible original backup for \(module.title). Legacy backups are retained separately and cannot authorize this Restore.")
+        }
         let pointer = try decode([String: String].self, at: originalURL(module))
         guard let id = pointer["transaction"], UUID(uuidString: id) != nil else { throw RegionOperationError("Invalid original-value record.") }
         let journal = try decode(RegionJournal.self, at: root.appendingPathComponent(id).appendingPathComponent("journal.plist"))
@@ -294,36 +373,63 @@ final class RegionTransactionCoordinator {
     }
 
     private func plans(in journal: RegionJournal) throws -> [RegionWritePlan] {
+        try checkSupported(journal)
+        let module = journal.module!
         guard !journal.entries.isEmpty, Set(journal.entries.map(\.file)).count == journal.entries.count else { throw RegionOperationError("Invalid journal targets.") }
-        try validateTargets(module: journal.module, files: journal.entries.map(\.file))
+        try validateTargets(module: module, files: journal.entries.compactMap(\.file))
         return try journal.entries.map { entry in
-            let before = try Data(contentsOf: bytesURL(journal, entry.file, "before"))
-            let after = try Data(contentsOf: bytesURL(journal, entry.file, "after"))
+            let file = entry.file!
+            let before = try Data(contentsOf: bytesURL(journal, file, "before"))
+            let after = try Data(contentsOf: bytesURL(journal, file, "after"))
             guard RegionBackupDigest.sha256(before) == entry.beforeSHA256,
                   RegionBackupDigest.sha256(after) == entry.afterSHA256 else { throw RegionOperationError("Backup checksum mismatch; no system write is authorized.") }
             try entry.scope.validate(before: before, after: after)
-            try validateAuthorization(module: journal.module, file: entry.file, scope: entry.scope)
-            let plan = RegionWritePlan(file: entry.file, before: before, after: after, scope: entry.scope)
-            try validateCachePlan(module: journal.module, plan: plan, applying: false)
+            try validateAuthorization(module: module, file: file, scope: entry.scope)
+            let plan = RegionWritePlan(file: file, before: before, after: after, scope: entry.scope)
+            try validateCachePlan(module: module, plan: plan, applying: false)
             return plan
         }
     }
 
     private func validateTargets(module: RegionModule, files: [RegionFile]) throws {
-        let expected: Set<RegionFile> = module == .fullJapan ? [.mobileGestalt, .mobileActivation]
-            : module == .mobileActivation ? [.mobileActivation] : [.mobileGestalt]
-        guard files.count == expected.count, Set(files) == expected else {
-            throw RegionOperationError("Transaction is missing a required module source; partial Full Japan transactions are forbidden.")
+        guard files == [.mobileGestalt] else {
+            throw RegionOperationError("Every current transaction requires exactly one MobileGestalt source.")
         }
+    }
+
+    private func checkSupported(_ journal: RegionJournal) throws {
+        guard journal.permitsCurrentRecovery else { throw RegionOperationError(journal.legacyBlock) }
     }
 
     /// Both apply and restore revalidate the actual plist layout. A saved byte
     /// whitelist alone never authorizes an unknown layout or another question.
     private func validateCachePlan(module: RegionModule, plan: RegionWritePlan, applying: Bool) throws {
-        guard plan.file == .mobileGestalt, !plan.scope.byteOffsets.isEmpty else { return }
-        let questions = module == .fullJapan ? RegionCacheQuestion.allCases : module.question.map { [$0] } ?? []
         let before = try RegionPlist.parse(plan.before).root
         let after = try RegionPlist.parse(plan.after).root
+        for root in [before, after] {
+            guard let extra = root["CacheExtra"] as? [String: Any] else { throw JapanRegionError.invalidMobileGestalt }
+            for key in plan.scope.extraKeys {
+                guard let value = extra[key] as? String, !value.isEmpty else { throw JapanRegionError.invalidMobileGestalt }
+            }
+        }
+        if module == .fullJapan {
+            guard let profile = JapanRegionProfile.verified(for: productType) else {
+                throw JapanRegionError.unsupportedProductType(productType)
+            }
+            try JapanRegionMutation.validate(plist: before, profile: profile, build: build)
+            try JapanRegionMutation.validate(plist: after, profile: profile, build: build)
+            if applying && !JapanRegionMutation.isApplied(to: after, profile: profile, build: build) {
+                throw RegionOperationError("Full Japan requires all six target values; partial changes are forbidden.")
+            }
+        }
+        if applying {
+            let expected = try RegionModuleMutation.plan(module: module, raw: plan.before, productType: productType, build: build)
+            guard RegionPlist.equal(after, try RegionPlist.parse(expected.after).root) else {
+                throw RegionOperationError("Replacement does not equal the selected module's complete target configuration.")
+            }
+        }
+        guard !plan.scope.byteOffsets.isEmpty else { return }
+        let questions = module == .fullJapan ? RegionCacheQuestion.allCases : module.question.map { [$0] } ?? []
         let layout = try RegionCacheMapping.layout(plist: before, build: build, productType: productType, questions: questions)
         _ = try RegionCacheMapping.layout(plist: after, build: build, productType: productType, questions: questions)
         let offsets = Set(layout.fields.map { $0.slot * 8 })
@@ -333,6 +439,12 @@ final class RegionTransactionCoordinator {
         guard Set(plan.scope.byteOffsets) == offsets || Set(plan.scope.byteOffsets) == legacy else {
             throw JapanRegionError.unverifiedCacheSemantics
         }
+        // Older scopes listed whole Boolean/validity storage. Compatibility
+        // never authorizes changes beyond the three validated low bytes.
+        guard let a = before["CacheData"] as? Data, let b = after["CacheData"] as? Data,
+              a.indices.allSatisfy({ offsets.contains($0) || a[$0] == b[$0] }) else {
+            throw JapanRegionError.invalidCachePatchLayout
+        }
         if applying, let data = after["CacheData"] as? Data, !layout.isApplied(to: data) {
             throw JapanRegionError.invalidCachePatchLayout
         }
@@ -340,17 +452,11 @@ final class RegionTransactionCoordinator {
 
     private func validateAuthorization(module: RegionModule, file: RegionFile, scope: RegionPatchScope) throws {
         var authorized = false
-        if file == .mobileActivation {
-            let families = [["DeviceRegionCountryCode", "CountryCode", "Region"],
-                            ["DeviceRegionRegionInfo", "RegionInfo"], ["DeviceRegionSoftwareBehaviors", "SoftwareBehaviors"]]
-            authorized = (module == .mobileActivation || module == .fullJapan) && scope.extraKeys.isEmpty && scope.byteOffsets.isEmpty
-                && scope.rootKeys.count == 3 && families.allSatisfy { Set($0).intersection(scope.rootKeys).count == 1 }
-        } else if scope.rootKeys.isEmpty {
+        if file == .mobileGestalt && scope.rootKeys.isEmpty {
             switch module {
             case .regionCode: authorized = scope.extraKeys == [JapanRegionMutation.regionCodeKey] && scope.byteOffsets.isEmpty
             case .regionInfo: authorized = scope.extraKeys.count == 1 && RegionModuleMutation.regionInfoKeys.contains(scope.extraKeys[0]) && scope.byteOffsets.isEmpty
             case .regulatoryModel: authorized = scope.extraKeys == [JapanRegionMutation.regulatoryModelKey] && scope.byteOffsets.isEmpty
-            case .intelligence: authorized = scope.extraKeys == [RegionModuleMutation.intelligenceKey] && scope.byteOffsets.isEmpty
             case .greenTea, .notGreenTea, .wapi, .fullJapan:
                 if let size = scope.cacheLength, size > 0, size <= 16384 * 9, size.isMultiple(of: 9),
                    scope.cacheUUID.flatMap(UUID.init(uuidString:)) != nil, scope.cacheVersion?.isEmpty == false {
@@ -369,7 +475,6 @@ final class RegionTransactionCoordinator {
                             && RegionModuleMutation.regionInfoKeys.filter { scope.extraKeys.contains($0) }.count == 1
                     } else { authorized = authorized && scope.extraKeys.isEmpty }
                 }
-            default: break
             }
         }
         guard authorized else { throw RegionOperationError("Module write scope is outside the fixed region whitelist.") }
@@ -379,7 +484,8 @@ final class RegionTransactionCoordinator {
         root.appendingPathComponent(journal.id).appendingPathComponent("\(file.rawValue).\(side).plist")
     }
     private func originalURL(_ module: RegionModule) -> URL {
-        root.appendingPathComponent("originals").appendingPathComponent("\(module.rawValue).plist")
+        let name = module == .fullJapan ? "fullJapan-v2" : module.rawValue
+        return root.appendingPathComponent("originals").appendingPathComponent("\(name).plist")
     }
     private func encode<T: Encodable>(_ value: T) throws -> Data {
         let encoder = PropertyListEncoder(); encoder.outputFormat = .binary

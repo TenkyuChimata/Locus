@@ -3,7 +3,7 @@ import Foundation
 import CoreFoundation
 
 nonisolated enum RegionModule: String, CaseIterable, Codable, Identifiable, Sendable {
-    case regionCode, regionInfo, regulatoryModel, greenTea, notGreenTea, wapi, intelligence, mobileActivation, fullJapan
+    case regionCode, regionInfo, regulatoryModel, greenTea, notGreenTea, wapi, fullJapan
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -13,8 +13,6 @@ nonisolated enum RegionModule: String, CaseIterable, Codable, Identifiable, Send
         case .greenTea: return "green-tea"
         case .notGreenTea: return "not-green-tea"
         case .wapi: return "wapi"
-        case .intelligence: return "Apple Intelligence Capability"
-        case .mobileActivation: return "MobileActivation Region Identity"
         case .fullJapan: return "Full Japan Region"
         }
     }
@@ -28,7 +26,6 @@ nonisolated enum RegionModule: String, CaseIterable, Codable, Identifiable, Send
     }
     var runtimeQuery: String {
         if let question { return question.rawValue }
-        if self == .intelligence { return RegionModuleMutation.intelligenceKey }
         return title
     }
 }
@@ -66,20 +63,21 @@ nonisolated enum RegionPlist {
     }
 }
 
-nonisolated enum RegionFile: String, Codable, Sendable { case mobileGestalt, mobileActivation }
+nonisolated enum RegionFile: String, Codable, Sendable { case mobileGestalt }
 
 nonisolated struct RegionPatchScope: Codable, Equatable, Sendable {
     var extraKeys: [String] = []
-    var rootKeys: [String] = []
+    var rootKeys: [String] = [] // Decode v1 metadata; never authorizes a current write.
     var byteOffsets: [Int] = []
     var cacheUUID: String?
     var cacheVersion: String?
     var cacheLength: Int?
 
     func validate(before: Data, after: Data) throws {
+        guard rootKeys.isEmpty else { throw RegionOperationError("Root-key mutations are no longer supported.") }
         let a = try RegionPlist.parse(before).root
         let b = try RegionPlist.parse(after).root
-        let allowedRoots = Set(rootKeys + (extraKeys.isEmpty ? [] : ["CacheExtra"]) + (byteOffsets.isEmpty ? [] : ["CacheData"]))
+        let allowedRoots = Set((extraKeys.isEmpty ? [] : ["CacheExtra"]) + (byteOffsets.isEmpty ? [] : ["CacheData"]))
         guard Set(a.keys) == Set(b.keys), Set(a.keys).allSatisfy({ allowedRoots.contains($0) || RegionPlist.equal(a[$0], b[$0]) }) else {
             throw RegionOperationError("Replacement changes an unrelated root key.")
         }
@@ -122,6 +120,11 @@ nonisolated struct RegionPatchScope: Codable, Equatable, Sendable {
         let before = try RegionPlist.parse(original).root
         let expected = try RegionPlist.parse(applied).root
         let parsed = try RegionPlist.parse(current)
+        for key in ["CacheUUID", "CacheVersion"] {
+            guard RegionPlist.equal(before[key], parsed.root[key]) else {
+                throw RegionOperationError("Backup cache identity differs from the current cache; restore refused.")
+            }
+        }
         let oldExtra = before["CacheExtra"] as? [String: Any] ?? [:]
         let liveExtra = parsed.root["CacheExtra"] as? [String: Any] ?? [:]
         for key in ["re6Zb+zwFKJNlkQTUeT+/w", "VasUgeSzVyHdB27g2XpN0g"] {
@@ -141,12 +144,6 @@ nonisolated struct RegionPatchScope: Codable, Equatable, Sendable {
                 extra[key] = oldExtra[key]
             }
             root["CacheExtra"] = extra
-        }
-        for key in rootKeys {
-            guard RegionPlist.equal(root[key], expected[key]) || RegionPlist.equal(root[key], before[key]) else {
-                throw RegionOperationError("Activation field was changed by another workflow; restore refused.")
-            }
-            root[key] = before[key]
         }
         if !byteOffsets.isEmpty {
             guard var data = root["CacheData"] as? Data, let old = before["CacheData"] as? Data,
@@ -180,7 +177,6 @@ struct RegionWritePlan {
         func display(_ value: Any?) -> String { value.map { String(describing: $0) } ?? "<absent>" }
         let ea = a["CacheExtra"] as? [String:Any] ?? [:], eb = b["CacheExtra"] as? [String:Any] ?? [:]
         rows += scope.extraKeys.map { "CacheExtra \($0): \(display(ea[$0])) → \(display(eb[$0]))" }
-        rows += scope.rootKeys.map { "\(file.rawValue) \($0): \(display(a[$0])) → \(display(b[$0]))" }
         if let da = a["CacheData"] as? Data, let db = b["CacheData"] as? Data {
             let slots = da.count / 9
             rows += scope.byteOffsets.filter { $0 < slots * 8 && $0.isMultiple(of: 8) && db.indices.contains($0) }
@@ -195,45 +191,17 @@ struct RegionWritePlan {
 
 enum RegionModuleMutation {
     static let regionInfoKeys = ["yK+xavymRGZ3xWc1tb8XDg", "zHeENZu+wbg7PUprwNwBWg"]
-    nonisolated static let intelligenceKey = "A62OafQ85EJAiiqKn4agtg"
-
-    static func activationPlan(raw: Data) throws -> RegionWritePlan {
-        let parsed = try RegionPlist.parse(raw)
-        var root = parsed.root
-        let families = [["DeviceRegionCountryCode", "CountryCode", "Region"],
-                        ["DeviceRegionRegionInfo", "RegionInfo"], ["DeviceRegionSoftwareBehaviors", "SoftwareBehaviors"]]
-        let keys = try families.map { family -> String in
-            let existing = family.filter { root[$0] != nil }
-            guard existing.count == 1, root[existing[0]] is String else { throw RegionOperationError("Unsupported or ambiguous MobileActivation field schema.") }
-            return existing[0]
-        }
-        let country = root[keys[0]] as! String, info = root[keys[1]] as! String, behavior = root[keys[2]] as! String
-        let isHex = behavior.lowercased().hasPrefix("0x")
-        let digits = isHex ? String(behavior.dropFirst(2)) : behavior
-        guard country.range(of: "^[A-Z]{2}$", options: .regularExpression) != nil,
-              info.range(of: "^[A-Z0-9]{1,4}/[A-Z]$", options: .regularExpression) != nil,
-              digits.range(of: isHex ? "^[0-9a-fA-F]+$" : "^[0-9]+$", options: .regularExpression) != nil,
-              UInt32(digits, radix: isHex ? 16 : 10) != nil else { throw RegionOperationError("Unsupported MobileActivation field values.") }
-        for (key, value) in zip(keys, ["JP", "J/A", "25"]) { root[key] = value }
-        let after = RegionPlist.equal(parsed.root, root) ? raw :
-            try PropertyListSerialization.data(fromPropertyList: root, format: parsed.format, options: 0)
-        let scope = RegionPatchScope(rootKeys: keys)
-        try scope.validate(before: raw, after: after)
-        return .init(file: .mobileActivation, before: raw, after: after, scope: scope)
-    }
-
     static func identityKey(_ module: RegionModule, extra: [String: Any]) throws -> String {
         switch module {
         case .regionCode: return JapanRegionMutation.regionCodeKey
         case .regulatoryModel: return JapanRegionMutation.regulatoryModelKey
-        case .intelligence: return intelligenceKey
         case .regionInfo:
             let existing = regionInfoKeys.filter { extra[$0] != nil }
             guard existing.count == 1 else {
                 throw RegionOperationError("Require exactly one existing RegionInfo key. Missing or dual aliases need runtime/binary semantic review; no alias will be added.")
             }
             return existing[0]
-        default: throw RegionOperationError("Not an identity/capability field.")
+        default: throw RegionOperationError("Not a region identity field.")
         }
     }
 
@@ -242,7 +210,18 @@ enum RegionModuleMutation {
         let parsed = try RegionPlist.parse(raw)
         var root = parsed.root
         var scope = RegionPatchScope()
-        if let question = module.question {
+        if module == .fullJapan {
+            guard let profile = JapanRegionProfile.verified(for: productType) else {
+                throw JapanRegionError.unsupportedProductType(productType)
+            }
+            root = try JapanRegionMutation.applying(to: parsed.root, profile: profile, build: build)
+            let layout = try JapanRegionCacheLayout.resolve(plist: parsed.root, build: build, productType: productType)
+            let extra = parsed.root["CacheExtra"] as! [String: Any]
+            scope = RegionPatchScope(extraKeys: [JapanRegionMutation.regionCodeKey,
+                try identityKey(.regionInfo, extra: extra), JapanRegionMutation.regulatoryModelKey],
+                byteOffsets: layout.fields.map { $0.slot * 8 }, cacheUUID: root["CacheUUID"] as? String,
+                cacheVersion: root["CacheVersion"] as? String, cacheLength: layout.size)
+        } else if let question = module.question {
             guard let data = root["CacheData"] as? Data else { throw JapanRegionError.missingCacheData }
             let layout = try RegionCacheMapping.layout(plist: root, build: build, productType: productType, questions: [question])
             root["CacheData"] = try layout.applying(to: data)
@@ -254,23 +233,14 @@ enum RegionModuleMutation {
         } else {
             guard var extra = root["CacheExtra"] as? [String: Any] else { throw JapanRegionError.invalidMobileGestalt }
             let key = try identityKey(module, extra: extra)
-            if module == .intelligence {
-                if let original = extra[key] {
-                    guard let number = original as? NSNumber,
-                          ["c", "B", "s", "i", "l", "q", "C", "S", "I", "L", "Q"].contains(String(cString: number.objCType)),
-                          number == 0 || number == 1 else { throw RegionOperationError("AI capability must be absent or a canonical Boolean/integer 0 or 1.") }
-                    extra[key] = CFGetTypeID(number) == CFBooleanGetTypeID() ? NSNumber(value: true) : NSNumber(value: 1)
-                } else { extra[key] = NSNumber(value: 1) }
-            } else {
-                guard let old = extra[key] as? String, !old.isEmpty else { throw RegionOperationError("Existing field must be a nonempty String.") }
-                switch module {
-                case .regionCode: extra[key] = "J"
-                case .regionInfo: extra[key] = "J/A"
-                case .regulatoryModel:
-                    guard let profile = JapanRegionProfile.verified(for: productType) else { throw JapanRegionError.unsupportedProductType(productType) }
-                    extra[key] = profile.regulatoryModel
-                default: throw RegionOperationError("Unsupported independent module.")
-                }
+            guard let old = extra[key] as? String, !old.isEmpty else { throw RegionOperationError("Existing field must be a nonempty String.") }
+            switch module {
+            case .regionCode: extra[key] = "J"
+            case .regionInfo: extra[key] = "J/A"
+            case .regulatoryModel:
+                guard let profile = JapanRegionProfile.verified(for: productType) else { throw JapanRegionError.unsupportedProductType(productType) }
+                extra[key] = profile.regulatoryModel
+            default: throw RegionOperationError("Unsupported independent module.")
             }
             scope.extraKeys = [key]
             root["CacheExtra"] = extra

@@ -38,7 +38,9 @@ var data = Data(repeating: 0, count: 6480)
 for slot in [383, 506, 694] { data[5760 + slot] = 1 }
 data[383 * 8] = 1; data[694 * 8] = 1; data[32] = 123
 let original = try encode(["CacheUUID": RegionCacheMapping.cacheUUID, "CacheVersion": "24B119", "CacheData": data,
-    "CacheExtra": ["re6Zb+zwFKJNlkQTUeT+/w": "synthetic-device", "unrelated": "keep"]])
+    "CacheExtra": ["re6Zb+zwFKJNlkQTUeT+/w": "synthetic-device", "unrelated": "keep",
+        JapanRegionMutation.regionCodeKey: "CH", JapanRegionMutation.regionInfoKey: "CH/A",
+        JapanRegionMutation.regulatoryModelKey: "A9999", "A62OafQ85EJAiiqKn4agtg": false]])
 let io = DiskAccess(directory.appendingPathComponent("cache.plist"))
 try original.write(to: io.url)
 let store = RegionTransactionCoordinator(root: directory.appendingPathComponent("backups"), access: io,
@@ -122,4 +124,33 @@ invalidData[5760 + 694] = 0; invalid["CacheData"] = invalidData
 try encode(invalid).write(to: io.url)
 refuses("restore invalid validity") { _ = try store.restore(module: .wapi) }
 expect(io.writes == writesBeforeCorruption)
-print("PASS: synthetic plist disk writes, preview/backup/cancel, three one-byte edits, readback, scoped restore, external drift, device/layout refusal and real rollback")
+// Full Japan uses the same production writer once for the complete six-field plan.
+try original.write(to: io.url)
+let fullBefore = io.writes
+let fullPrepared = try store.prepare(module: .fullJapan, plans: [plan(.fullJapan)])!
+expect(fullPrepared.schemaVersion == 2 && fullPrepared.entries.count == 1 && io.writes == fullBefore)
+_ = try store.commitPrepared(fullPrepared.id)
+expect(io.writes == fullBefore + 1)
+let fullApplied = try io.read(.mobileGestalt)
+expect(JapanRegionMutation.isApplied(to: try RegionPlist.parse(fullApplied).root,
+    profile: JapanRegionProfile.verified(for: "iPhone18,3")!, build: "24B119"))
+expect((try RegionPlist.parse(fullApplied).root["CacheExtra"] as! [String:Any])["A62OafQ85EJAiiqKn4agtg"] as? Bool == false)
+let fullPointerURL = store.root.appendingPathComponent("originals/fullJapan-v2.plist")
+let fullPointer = try Data(contentsOf: fullPointerURL)
+_ = try store.apply(module: .fullJapan, plans: [plan(.fullJapan)])
+expect(try io.writes == fullBefore + 1 && Data(contentsOf: fullPointerURL) == fullPointer)
+_ = try store.restore(module: .fullJapan)
+expect(try io.read(.mobileGestalt) == original && io.writes == fullBefore + 2)
+io.failAfterWrite = true
+refuses("full write failure") { _ = try store.apply(module: .fullJapan, plans: [plan(.fullJapan)]) }
+expect(try io.read(.mobileGestalt) == original && store.pending().isEmpty)
+// Relaunch recovers a written single-file Full Japan through the same C engine.
+let crashFull = try store.prepare(module: .fullJapan, plans: [plan(.fullJapan)])!
+_ = try store.commitPrepared(crashFull.id)
+let journalURL = store.root.appendingPathComponent(crashFull.id).appendingPathComponent("journal.plist")
+var interrupted = try PropertyListDecoder().decode(RegionJournal.self, from: Data(contentsOf: journalURL))
+interrupted.phase = .writing
+try PropertyListEncoder().encode(interrupted).write(to: journalURL)
+_ = try store.recoverPending()
+expect(try io.read(.mobileGestalt) == original && store.pending().isEmpty)
+print("PASS: single-file Full Japan and independent synthetic plist disk writes, preview/backup/cancel, three one-byte edits, readback, scoped restore, external drift, device/layout refusal and real rollback")

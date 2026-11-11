@@ -15,7 +15,7 @@ for source in Locus/LowLevel/*.c; do
     printf 'iPhoneOS arm64 syntax: %s\n' "$source"
     xcrun --sdk iphoneos clang "$@" -std=c17 "$source"
 done
-for source in Locus/LowLevel/*.m Locus/CoreText/*.m Locus/Locus-Bridging-Header.h; do
+for source in Locus/LowLevel/*.m Locus/Locus-Bridging-Header.h; do
     printf 'iPhoneOS arm64 syntax: %s\n' "$source"
     xcrun --sdk iphoneos clang "$@" -x objective-c -fobjc-arc -fblocks -fmodules \
         -fmodules-cache-path="$temporary/modules" -Wno-nullability-completeness "$source"

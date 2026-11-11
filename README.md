@@ -1,142 +1,141 @@
 # Locus
 
-Locus is an iOS/iPadOS MobileGestalt management tool with device diagnostics,
-independent region and capability changes, and backed-up transactions. Hardware
-identity is never rewritten. It uses private APIs and requires a device you own
-or are authorized to manage. It is not affiliated with Apple.
+Locus is an iOS/iPadOS MobileGestalt region tool. Its writable settings are
+limited to the following six fields. **Full Japan Region applies all six in one
+MobileGestalt plist transaction.** Hardware identity is never rewritten.
 
-## Features and availability
-
-| Feature | Behavior and requirements |
+| Setting | Target |
 | --- | --- |
-| Diagnostics | Model, iOS/build, cache access, CacheUUID, CacheVersion, CacheData length, runtime answers and DeviceTree values |
-| RegionCode | Changes an existing string to J; exact-value restore |
-| RegionInfo | Changes exactly one existing region-info key to J/A; ambiguous dual keys are rejected |
-| RegulatoryModelNumber | Uses the existing real-ProductType whitelist for the Japan model |
-| Apple Intelligence capability | Changes a missing or canonical Boolean/integer flag to true/1; restores its original type or absence |
-| green-tea / not-green-tea / wapi | Known device/build/UUID layout, canonical valid Boolean slots, no CacheExtra overrides and file write access |
-| MobileActivation | Requires verified container identity, schema and reviewed storage/consumer semantics; separate refresh in Region |
-| Japan RegionalBehavior | Complete runtime dictionary, independent Boolean queries and 16-byte CFData comparison against a user-observed Japan reference; reference device/build/environment remain unconfirmed |
-| Full Japan Region | Six-field Japan identity plus an applicable complete RegionalBehavior match, separately verified restart and system functions; aggregate Apply is disabled until a persistent RegionalBehavior mechanism is verified; AI is independent |
-| CoreText GB18030 | Separate process-local experiment, requiring a reviewed loaded binary and writable target memory |
+| RegionCode | `J` |
+| RegionInfo | `J/A`, using exactly one existing supported key |
+| RegulatoryModelNumber | Japanese model from the existing verified ProductType map |
+| green-tea | `false` |
+| not-green-tea | `true` |
+| wapi | `false` |
 
-CacheData editing currently supports only **iPhone18,3 / iOS 27.2 / 24B119**,
-CacheUUID `48CB1FAC-755B-435F-9A01-A20E5D810EA9`, 6480 bytes (720 slots).
-The device-observed type-11 slots are green-tea 383, not-green-tea 506 and wapi
-694. Targets are false, true and false, respectively. Unknown models, builds,
-UUIDs or lengths are refused. Each option checks its canonical 8-byte Boolean,
-validity=1 and both hashed/plain CacheExtra aliases independently. Only the
-value's first byte may change; validity is never repaired or enabled.
-CacheExtra's field count is metadata, not a layout identifier.
+Each setting supports Review Changes, Apply and Restore. Full Japan offers the
+same workflow for the combined six-field configuration. It does not change or
+verify every system region behavior. Restart the device, observe runtime answers
+and test affected features separately after applying.
 
-MobileActivation and CoreText review registries remain empty and their actions
-remain unavailable. Identity and AI actions still require valid inputs, backups
-and actual on-device access. A capability flag does
-not establish service availability or successful activation.
+## Supported layouts
 
-The six independent Japan identity actions retain their backup/restore workflow.
-Their success does not complete Full Japan. The Japan reference is `0x19` with
-ChinaBrick/GB18030=false and NTSC/ShutterClick=true; SwBHValid and
-RegionalBehaviorValid are checked separately, along with every other observed
-Boolean. An exact value comparison with unconfirmed reference scope is displayed
-as **Reference Consistent — Scope Not Verified**, never **Match**. Missing values,
-type errors and extra dictionary fields block strict acceptance; an observed
-value difference displays **RegionalBehavior Mismatch**. CacheExtra is not required.
-MobileActivation's legacy preset `25` is not proof that RegionalBehavior adopted
-`0x19`. Existing legacy transaction restoration/recovery remains available under
-its original safety checks. See [the evidence review and acceptance notes](Docs/RegionalBehavior-acceptance.md).
+CacheData writes and Full Japan currently support only **iPhone18,3 / iOS 27.2 /
+24B119**, CacheUUID `48CB1FAC-755B-435F-9A01-A20E5D810EA9`, CacheVersion `24B119`,
+6480 bytes (720 slots). The verified Japan model for this ProductType is `A3519`.
+The existing ProductType/model map is unchanged; it does not authorize CacheData
+writes on other models.
 
-## Reading and diagnostics
+The Boolean slots are green-tea 383, not-green-tea 506 and wapi 694. Each must
+contain a canonical 8-byte Boolean with validity exactly 1. Hashed or plain
+CacheExtra overrides block the corresponding slot. Only the low value byte may
+change; validity is never enabled or repaired. Unknown devices, builds, UUIDs,
+lengths, field types, invalid slots and ambiguous RegionInfo keys are refused.
+The three independent CacheExtra settings retain their existing checks without
+requiring the unrelated CacheData options to be supported.
 
-Diagnostics and Region share `MobileGestaltAccess`. A read acquires a worse_query
-lease for the existing MobileGestalt cache directory, opens the fixed absolute
-`/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist`
-path, checks that the opened object is a nonempty regular file of at most 16 MiB,
-and reads it once. Plist display additionally requires a dictionary. The file
-opens with `O_RDONLY | O_NOFOLLOW`; descriptors and leases are released on exit.
-Permission and parsing failures appear in Diagnostics and can be retried with
-Refresh. Raw-byte reads remain available to the backup/transaction code.
+Full Japan validates all six before preparing a single plan, using
+`JapanRegionMutation.applying()`. The coordinator independently checks the exact
+three CacheExtra keys, three Boolean offsets and complete six-field target.
+Other plist values, CacheData bytes, CacheUUID and CacheVersion must remain
+semantically unchanged. Plist serialization can change container encoding; raw
+original bytes are retained for exact restoration where possible.
 
-The fixed system ancestors are trusted and may resolve through symlinks. Final
-component `O_NOFOLLOW` is **not** equivalent to opening every ancestor without
-following links. Ordinary reads neither open `/private` separately nor require
-runtime descriptor mapping, hashes, repeated reads or an audit export. A single
-read does not promise a coherent snapshot during a concurrent system update.
+## Review, Apply and Restore
 
-Cache writes use the fixed, device-verified layout above; no loaded-image scan
-or independent audit report is required. Loaded-image helpers remain available
-for the separate native experiments. Diagnostics does not request write access or
-scan MobileActivation containers. Its runtime answers and DeviceTree values are
-independent observations of current process APIs and IORegistry.
+The Region page contains Device, Individual Region Settings, Full Japan Region
+and Recovery. Legacy backup details appear when relevant. Current file values,
+targets, runtime observations, access and original-backup availability are shown
+separately. Full Japan reports Ready, Applied, Not Applied, Unsupported or
+Recovery Required. Applied means the six persistent values match; it makes no
+claim about post-restart runtime or all system behavior.
 
-RegionalBehavior Source Diagnostics reuses the existing DeviceTree and MG access
-interfaces. Each refresh attempts `/chosen/software-behavior` and
-`marketing-software-behavior` before its MG queries, preserving raw types, lengths,
-hex and Base64. Earlier initialization by frameworks or this process is unknown:
-this is **not a first-initialization snapshot**. Read-only MG calls can initialize
-process caches. MobileActivation API domain/code comes from the last explicit
-Advanced Research refresh; its separately displayed time may differ. Expanding
-diagnostics does not scan containers or authorize writes.
+Review Changes rereads and validates the source, saves complete original and
+intended bytes with SHA-256 checksums, and durably prepares a journal. No system
+write happens until the confirmation sheet's Apply or Restore button is pressed.
+Confirmation uses the saved preview; any source-byte change rejects the write.
+Already matching values report **Already Applied / No Changes Needed**, without
+writing or creating an invented original baseline. An existing compatible
+original remains available for Restore.
 
-## Backups and recovery
+Every write uses `RegionTransactionCoordinator`, `MobileGestaltAccess` and the
+inode-preserving `InPlaceFileTransaction` writer. Full byte readback follows
+replacement; failures attempt a verified rollback. Original module pointers are
+immutable. Restore uses the saved original target values, preserves unrelated
+later changes and refuses externally changed target fields or incompatible
+cache identities. New iOS journals bind the app vendor identifier as well as
+ProductType/build; cached device identifiers, when present, must also match.
 
-Persistent actions use the serialized Region coordinator. It saves original and
-intended bytes, SHA-256 checksums, device/build identity, a fixed write scope and
-a durable journal before writing. New iOS journals also bind the device's app
-vendor identifier; cached device identifiers, when present, must match on
-restore. Backups remain inside this app's local container; no backup import or
-cross-device restore is offered. Exact current bytes must match before each
-write. Readback verifies results; failures attempt reverse-order rollback and
-report verified recovery or recovery required.
+Backups are in `Documents/Region Module Backups`, inside the app container.
+"Original" means the values before this module's first edit in its backup
+format, not factory provenance. Preserve the app container while recovery is
+pending; export it through Xcode before reinstalling.
 
-Choose **Review Changes** to reread and validate the cache, view the exact
-before/after values and save verified full backups. Only then does the
-confirmation sheet enable **Apply** (or **Restore**). Cancel closes the prepared
-journal without claiming an original edit. Confirmation reuses the saved bytes;
-any source change since preview is rejected rather than silently replanned.
-Already-matching targets cause no write and no invented original backup.
+## Legacy backups and recovery
 
-`Documents/Region Module Backups` holds first-module originals and operation
-journals. Legacy backups are retained. "Original" means before Locus's first
-edit, not factory provenance. Restore preserves unrelated fields and rejects
-incompatible updates or external target-field changes. An unfinished journal
-blocks writes to its affected source until recovered. Keep the app container and
-backups while recovery is pending; export the container through Xcode before
-reinstalling.
+New journals carry `schemaVersion = 2`. Full Japan uses
+`originals/fullJapan-v2.plist`; the old `originals/fullJapan.plist` is never
+reused, overwritten or migrated automatically. Existing compatible single-field
+v1 MobileGestalt originals retain their names and can still restore within the
+six-setting whitelist. Their checksums, context, layout and scope are rechecked.
 
-The inode-preserving writer uses truncation and in-place writes. Partial content
-can be visible to other readers; neither power-loss atomicity nor cross-file
-atomicity is guaranteed. `flock` coordinates Locus writers but cannot exclude
-uncooperative system daemons. Readback and fsync do not prove power-loss safety.
-If interrupted bytes match neither original nor intended data, automatic
-recovery refuses a forced overwrite and retains the full backups for recovery.
+The small legacy compatibility layer reads obsolete module/file names as
+metadata only. Old dual-file Full Japan, standalone MobileActivation and Apple
+Intelligence transactions are excluded from current Apply/Restore authorization.
+Completed legacy journals and original pointers remain intact and are shown as
+legacy records. Missing or corrupt legacy backups are reported explicitly.
+The older `Japan Region Transaction Backups` directory is also retained, with
+no automatic import of its unjournaled files.
 
-CoreText changes no system file or page protection and restores its temporary
-cached byte. Glyph-cache reuse can still make its rendering result inconclusive.
-Its normal GB18030 predicate reads RegionalBehaviorGB18030 through MG and caches
-the result with dispatch_once. A separate currentLocale country-code CN branch
-can also affect glyphs. The experiment is limited to Locus; a false MG value does
-not guarantee normal rendering of every target glyph or verify other processes.
-The existing experiment gate stays closed for unreviewed binaries.
+Any unfinished unsupported legacy transaction blocks new writes and automatic
+recovery. Locus retains every journal and backup for manual recovery review;
+it never restores MobileActivation or an obsolete capability. A malformed
+journal also blocks writes. Recovery of supported six-setting transactions
+retains the existing context, checksums, compare-and-replace, rollback and
+readback checks. No backup or journal is automatically deleted.
+
+The in-place writer truncates and rewrites the existing inode. Partial content
+can be visible to other readers; writes are not crash or power-loss atomic.
+`flock` coordinates Locus writers but cannot exclude system daemons. If bytes
+match neither original nor intended content, recovery refuses forced overwrite.
+
+## Diagnostics and access
+
+Diagnostics shows device/build, cache access, CacheUUID, CacheVersion, CacheData
+length, CacheExtra and ordinary MobileGestalt runtime answers. Runtime answers
+are current-process observations and may initialize process caches.
+
+Reads acquire a worse_query lease for the fixed MobileGestalt cache directory
+and open the fixed system plist with `O_RDONLY | O_NOFOLLOW`. The opened file must
+be a nonempty regular file no larger than 16 MiB. Descriptors and leases are
+released on exit. Ancestor symlinks are resolved by the OS; final-component
+`O_NOFOLLOW` does not imply every ancestor was opened without following links.
+A single read does not promise a coherent snapshot during a concurrent update.
+
+MobileActivation access/discovery, RegionalBehavior reference research, CoreText
+memory experiments and Apple Intelligence writes have been removed. There are
+no DeviceTree, NVRAM, SysCfg or firmware write paths. The independent firmware
+research directory outside this repository is untouched.
 
 ## Build and sign
 
-Use Xcode with the project's iOS SDK, Developer Mode, and your own signing team.
-The project/scheme is `Locus`, with default bundle identifier
-`io.github.tenkyuchimata.locus`. No team is hardcoded. Register a dedicated App
-Group `group.<your Bundle Identifier>` and authorize it in the provisioning
-profile. Debug and Release both use `Locus/Locus.entitlements`.
+Use Xcode, Developer Mode and your own signing team. The project/scheme is
+`Locus`, default bundle identifier `io.github.tenkyuchimata.locus`. No team is
+hardcoded. Register a dedicated App Group `group.<your Bundle Identifier>` and
+authorize it in the provisioning profile. Debug and Release both use
+`Locus/Locus.entitlements`.
 
-The bridge checks signed entitlements and group-container access. A single
-signer-remapped group is accepted; ambiguous multiple groups require the
-bundle-derived group. Re-signing an unsigned IPA must provide usable App Group
-entitlements. Compilation alone does not establish device access.
+The bridge retains signed-entitlement and group-container checks. A single
+signer-remapped group is accepted; ambiguous groups require the bundle-derived
+group. Re-signing an IPA must provide usable App Group entitlements. Compilation
+does not establish device access.
 
-worse_query temporarily replaces the dedicated group's `Library/Caches` path.
-Locus preserves existing data by rename and restores the original directory,
-with process serialization and a cross-process lock. Residual links or
-`.locus-worse-query-caches` backups are refused rather than deleted. Inspect and
-preserve them after interruption. Other apps should not share this workspace.
+worse_query temporarily replaces the dedicated group's `Library/Caches` path,
+preserving existing data by rename and restoring the original directory. It
+retains process serialization and a cross-process lock. Residual links and
+`.locus-worse-query-caches` backups are refused rather than deleted. Other apps
+should not share this workspace. Its lease allowlist is limited to the existing
+MobileGestalt cache directory; container scanning and inode discovery are gone.
 
 ```sh
 xcodebuild -project Locus.xcodeproj -scheme Locus -configuration Release \
@@ -148,25 +147,18 @@ xcodebuild -project Locus.xcodeproj -scheme Locus -configuration Release \
 ## Validation
 
 ```sh
-sh Scripts/test-portable.sh    # C sanitizers, Python/project checks; Swift if available
-sh Scripts/test-swift.sh       # planners, layouts, journals, recovery and synthetic plist disk writes
-sh Scripts/test-macos.sh       # native access/write/image tests and Swift; Apple SDKs
+sh Scripts/test-portable.sh    # C ASan/UBSan, Python/project checks; Swift if available
+sh Scripts/test-swift.sh       # six-field planners, journals, legacy compatibility, disk writes
+sh Scripts/test-macos.sh       # native access/CAS/lease regressions and Swift; Apple SDKs
 sh Scripts/check-ios-native.sh # iPhoneOS arm64 source checks; Xcode required
 ```
 
-Tests use synthetic data, temporary files and simulated private authorization
+Tests use synthetic data, temporary files and simulated native authorization
 APIs. Optional local device snapshots remain read-only and are never bundled.
-Set `LOCUS_MG_BINARY` to the existing identified 24B119 libMobileGestalt extraction
-to run the optional static Valid control-flow checks; without it those checks
-are explicitly skipped. No firmware is bundled and no write layout is authorized
-by these checks.
-CI runs portable checks, native host/Swift and iPhoneOS source checks, independent
-unsigned Debug/Release builds, then a gated Release rebuild and IPA packaging.
-A failed required check prevents IPA upload.
-
-Linux checks cannot validate Objective-C/Swift against Apple SDKs, device sandbox
-access or the actual UI. macOS tests, iPhoneOS Debug/Release builds, packaging and
-real-device read/refresh checks must be verified in their respective environments.
+CI retains portable/native checks and unsigned Debug/Release builds; every
+required check must pass before IPA packaging/upload. Linux checks cannot
+validate Apple SDK compilation, SwiftUI, device sandbox access or real-device
+behavior. Those require macOS/Xcode and a separately authorized device run.
 
 ## License
 

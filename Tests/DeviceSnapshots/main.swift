@@ -6,7 +6,7 @@ for path in CommandLine.arguments.dropFirst() {
     let original = try Data(contentsOf: url)
     let parsed = try RegionPlist.parse(original).root
     let product = (parsed["CacheExtra"] as? [String:Any])?["h9jDsbgj7xIVeIQ8S3/X3Q"] as? String ?? ""
-    for module in [RegionModule.regionCode, .regionInfo, .intelligence] + (JapanRegionProfile.verified(for: product)?.productType == nil ? [] : [.regulatoryModel]) {
+    for module in [RegionModule.regionCode, .regionInfo] + (JapanRegionProfile.verified(for: product)?.productType == nil ? [] : [.regulatoryModel]) {
         let plan = try RegionModuleMutation.plan(module: module, raw: original, productType: product)
         try plan.scope.validate(before: original, after: plan.after)
         let restored = try plan.scope.restoring(original: original, applied: plan.after, current: plan.after)
