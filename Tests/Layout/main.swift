@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Synthetic data exercises the actual pure mutation/layout implementation.
-// It does not register a production fingerprint or validate any Apple binary.
+// It does not validate any Apple binary or access a device.
 import Foundation
 
 func refuses(_ body: () throws -> Void) {
@@ -17,11 +17,12 @@ original[42] = 0x8A // an unrelated non-boolean slot must survive
 original[0x0BF0] = 1
 original[0x0FC8] = 0
 original[0x15A8] = 1
+for offset in [0x17F6, 0x1871, 0x192D] { original[offset] = 1 }
 try layout.validate(original)
 let changed = try layout.applying(to: original)
 assert(layout.isApplied(to: changed))
 assert(changed.count == original.count && changed[42] == 0x8A)
-let expectedChanges: Set<Int> = [0x0BF0, 0x0FC8, 0x15A8, 0x17F6, 0x1871, 0x192D]
+let expectedChanges: Set<Int> = [0x0BF0, 0x0FC8, 0x15A8]
 assert(Set(original.indices.filter { original[$0] != changed[$0] }) == expectedChanges)
 let repeated = try layout.applying(to: changed)
 assert(repeated == changed)
@@ -39,7 +40,7 @@ let duplicate = JapanRegionCacheLayout(size: layout.size, slotCount: layout.slot
                                       fields: [layout.fields[0], layout.fields[0]])
 refuses { try duplicate.validate(original) }
 
-// Synthetic 720-slot structural candidate. It is never a reviewed schema.
+// Size alone cannot select a layout.
 var current = Data(repeating: 0, count: 6480)
 current[0x2B5 * 8] = 100
 let currentPlist: [String: Any] = [

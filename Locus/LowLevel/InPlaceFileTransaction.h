@@ -12,6 +12,7 @@ typedef enum {
 
 // Compare exact bytes on the opened, locked, regular inode before truncation.
 // Never creates a file. On failure, reports whether exact rollback was verified.
+// Not crash/power-loss atomic; callers must save durable backups before entry.
 int LocusReplaceFile(const char *path, const void *expected, size_t expectedSize,
                      const void *replacement, size_t replacementSize,
                      LocusFileOutcome *outcome);

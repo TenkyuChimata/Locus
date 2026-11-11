@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
 
-/// CacheUUID is a candidate descriptor-schema key, not a proven binary identity.
-/// Its relationship to the descriptor table must be established in the binary.
-/// A UUID may be registered only after its three question-to-slot mappings have
-/// been audited against libMobileGestalt. Equal lengths or equal answers do not prove
-/// that mapping: in particular green-tea and wapi can have identical values.
+/// Validated Boolean value slots and their existing validity bytes.
 struct JapanRegionCacheLayout {
     struct BooleanField {
         let question: String
@@ -18,21 +14,8 @@ struct JapanRegionCacheLayout {
     let fields: [BooleanField]
 
     static func resolve(plist: [String: Any], build: String, productType: String = "") throws -> Self {
-        let assessments = RegionCacheMapping.assess(plist: plist, build: build,
-            image: RegionCacheMapping.loadedImage(), writeAccess: false, productType: productType)
-        if let data = plist["CacheData"] as? Data,
-           assessments.count == RegionCacheQuestion.allCases.count,
-           assessments.allSatisfy({ ($0.status == .binaryVerified || $0.status == .writable) && $0.valid == 1 }) {
-            let layout = Self(size: data.count, slotCount: data.count / 9, fields: try assessments.map { item in
-                guard let descriptor = item.descriptor else { throw JapanRegionError.unverifiedCacheSemantics }
-                return .init(question: item.question.rawValue, slot: descriptor.slot, value: item.question.target)
-            })
-            try layout.validate(data)
-            return layout
-        }
-        guard !build.isEmpty, plist["CacheVersion"] as? String == build else { throw JapanRegionError.staleCache }
-        guard plist["CacheData"] is Data else { throw JapanRegionError.missingCacheData }
-        throw JapanRegionError.unverifiedCacheSemantics
+        try RegionCacheMapping.layout(plist: plist, build: build, productType: productType,
+                                      questions: RegionCacheQuestion.allCases)
     }
 
     func validate(_ data: Data) throws {
@@ -45,16 +28,17 @@ struct JapanRegionCacheLayout {
         }
         let validBase = slotCount * MemoryLayout<UInt64>.size
         guard validBase + slotCount == size,
-              Set(fields.map(\.slot)).count == fields.count,
+              !fields.isEmpty, Set(fields.map(\.slot)).count == fields.count,
               fields.allSatisfy({ (0..<slotCount).contains($0.slot) }),
               data[validBase..<size].allSatisfy({ $0 <= 1 }) else {
             throw JapanRegionError.invalidCachePatchLayout
         }
         for field in fields {
             let offset = field.slot * MemoryLayout<UInt64>.size
-            // Only canonical booleans are accepted, including when invalid.
+            // Invalid slots may be recomputed by the system; never make them valid.
             guard data[offset] <= 1,
-                  data[(offset + 1)..<(offset + 8)].allSatisfy({ $0 == 0 }) else {
+                  data[(offset + 1)..<(offset + 8)].allSatisfy({ $0 == 0 }),
+                  data[validBase + field.slot] == 1 else {
                 throw JapanRegionError.invalidCachePatchLayout
             }
         }
@@ -66,12 +50,9 @@ struct JapanRegionCacheLayout {
         for field in fields {
             let offset = field.slot * 8
             result[offset] = field.value ? 1 : 0
-            result[slotCount * 8 + field.slot] = 1
         }
         // Independently enforce the entire write set, including unchanged slots.
-        let allowed = Set(fields.flatMap { field in
-            [field.slot * 8, slotCount * 8 + field.slot]
-        })
+        let allowed = Set(fields.map { $0.slot * 8 })
         guard result.indices.allSatisfy({ result[$0] == original[$0] || allowed.contains($0) }) else {
             throw JapanRegionError.invalidCachePatchLayout
         }

@@ -3,6 +3,9 @@
 import Combine
 #endif
 import Foundation
+#if os(iOS)
+import UIKit
+#endif
 
 struct RegionModuleStatus: Identifiable {
     let module: RegionModule
@@ -43,12 +46,14 @@ final class RegionIdentityService: ObservableObject {
     @Published private(set) var comparisons: [String] = []
     @Published private(set) var build = ""
     @Published private(set) var productType = ""
-    @Published private(set) var binaryUUID = "<unavailable>"
+    @Published private(set) var cacheUUID = "<unavailable>"
+    @Published private(set) var prepared: RegionJournal?
     @Published var shouldRespring = false
 
     private let gestalt = MobileGestaltAccess.shared()
     private let activation = MobileActivationRegionAccess.shared()
     private let backupRoot: URL?
+    private let deviceID: String?
     private let fileAccess: RegionFileAccess
     private let deviceContext: () -> (productType: String, build: String)
     private var activationInfo: [String: Any] = ["mutationSchemaSupported": false,
@@ -56,13 +61,21 @@ final class RegionIdentityService: ObservableObject {
     private var activationObservedAt: Date?
 
     init(backupRoot: URL? = nil, access: RegionFileAccess? = nil,
-         deviceContext: (() -> (productType: String, build: String))? = nil) {
+         deviceContext: (() -> (productType: String, build: String))? = nil, deviceID: String? = nil) {
+        #if os(iOS)
+        self.deviceID = deviceID ?? UIDevice.current.identifierForVendor?.uuidString
+        #else
+        self.deviceID = deviceID
+        #endif
         self.backupRoot = backupRoot
         self.fileAccess = access ?? NativeRegionFileAccess()
         self.deviceContext = deviceContext ?? { (RealDeviceIdentity.productType, MobileGestaltAccess.currentOSBuild()) }
     }
 
     private func coordinator() throws -> RegionTransactionCoordinator {
+        #if os(iOS)
+        guard deviceID != nil else { throw RegionOperationError("Device identity is unavailable. Unlock the device and reopen Locus.") }
+        #endif
         let root: URL
         if let backupRoot { root = backupRoot }
         else {
@@ -70,7 +83,7 @@ final class RegionIdentityService: ObservableObject {
                 appropriateFor: nil, create: true).appendingPathComponent("Region Module Backups", isDirectory: true)
         }
         let context = deviceContext()
-        return .init(root: root, access: fileAccess, productType: context.productType, build: context.build)
+        return .init(root: root, access: fileAccess, productType: context.productType, build: context.build, deviceID: deviceID)
     }
 
     func refresh(includeActivation: Bool = false) {
@@ -99,11 +112,10 @@ final class RegionIdentityService: ObservableObject {
             runtime = try gestalt.runtimeAnswers(for: RegionModule.allCases.filter { $0 != .fullJapan && $0 != .mobileActivation }.map(\.runtimeQuery)
                 + RegionModuleMutation.regionInfoKeys)
         } catch { errors.append("Runtime: \(error.localizedDescription)") }
-        let image = RegionCacheMapping.loadedImage()
-        binaryUUID = image["binaryUUID"] as? String ?? "<unavailable>"
+        cacheUUID = plist["CacheUUID"] as? String ?? "<unavailable>"
         let writeStatus = gestalt.cacheWriteAccessStatus()
         let writeAccess = (writeStatus["writable"] as? NSNumber)?.boolValue == true
-        let assessments = RegionCacheMapping.assess(plist: plist, build: build, image: image, writeAccess: writeAccess, productType: productType)
+        let assessments = RegionCacheMapping.assess(plist: plist, build: build, writeAccess: writeAccess, productType: productType)
         var transactionStore: RegionTransactionCoordinator?
         var blocked: String?
         var pendingTransactions: [RegionJournal] = []
@@ -111,8 +123,8 @@ final class RegionIdentityService: ObservableObject {
             let store = try coordinator()
             transactionStore = store
             let pending = try store.pending()
-            pendingTransactions = pending
-            recoveryDetail = pending.isEmpty ? nil : pending.map { "\($0.module.title): \($0.phase.rawValue) (\($0.id))" }.joined(separator: "\n")
+            pendingTransactions = pending.filter { $0.id != prepared?.id }
+            recoveryDetail = pendingTransactions.isEmpty ? nil : pendingTransactions.map { "\($0.module.title): \($0.phase.rawValue) (\($0.id))" }.joined(separator: "\n")
         } catch {
             recoveryDetail = error.localizedDescription
             blocked = "Backup/journal inspection failed: \(error.localizedDescription)"
@@ -140,19 +152,16 @@ final class RegionIdentityService: ObservableObject {
                     detail += " Last explicit research observation: \(activationObservedAt.formatted(date: .abbreviated, time: .standard)). Refresh research to observe again."
                 }
             } else if let question = module.question, let item = assessments.first(where: { $0.question == question }) {
-                current = item.cacheValue.map { "\($0) (valid=\(item.valid.map(String.init) ?? "?"))" } ?? "<unavailable>"
+                current = item.cacheValue.map(String.init) ?? "<unavailable>"
                 access = item.status.rawValue
                 detail += item.reason
-                if let descriptor = item.descriptor {
-                    detail += " \(descriptor.section)+0x\(String(descriptor.offset, radix: 16)); index=\(descriptor.slot), type=\(descriptor.type), flags=0x\(String(descriptor.flags, radix: 16))."
-                }
                 applicable = item.permitsMutation
             } else {
                 do {
                     let key = try RegionModuleMutation.identityKey(module, extra: extra)
                     current = display(extra[key])
                     guard let raw else { throw JapanRegionError.invalidMobileGestalt }
-                    _ = try RegionModuleMutation.plan(module: module, raw: raw, productType: productType, assessments: assessments)
+                    _ = try RegionModuleMutation.plan(module: module, raw: raw, productType: productType, build: build)
                     applicable = writeAccess
                     access = writeAccess ? "Writable" : "Read-only"
                     detail += "Existing key: \(key). Independent of CacheData and MobileActivation."
@@ -165,10 +174,15 @@ final class RegionIdentityService: ObservableObject {
                     }
                 }
             }
+            var restoreReady = original && moduleBlocked == nil && (module.question != nil || module == .mobileActivation ? applicable : writeAccess)
+            if restoreReady {
+                do { _ = try transactionStore?.restorePlans(module: module) }
+                catch { restoreReady = false; detail += " Restore unavailable: \(error.localizedDescription)" }
+            }
             statuses.append(.init(module: module, cache: current, runtime: runtimeValue, expected: expected(module),
                 access: access, verification: "Persistent and current-process observations only. Restart/function verification pending.",
                 detail: detail, originalAvailable: original, canApply: applicable && moduleBlocked == nil && !originalInvalid,
-                canRestore: original && moduleBlocked == nil && (module.question != nil || module == .mobileActivation ? applicable : writeAccess)))
+                canRestore: restoreReady))
         }
         let prerequisites = statuses.filter { $0.module != .intelligence }
         var fullReady = prerequisites.allSatisfy(\.canApply)
@@ -185,44 +199,57 @@ final class RegionIdentityService: ObservableObject {
         errorMessage = errors.isEmpty ? nil : errors.joined(separator: "\n")
     }
 
-    func apply(_ module: RegionModule) {
+    /// Prepare the exact diff and verified full backups before enabling the
+    /// confirmation button. The existing journal's prepared phase does no write.
+    @discardableResult
+    func prepare(_ module: RegionModule, restore: Bool = false) -> Bool {
+        guard !isBusy, prepared == nil else { return false }
         refresh(includeActivation: module == .mobileActivation || module == .fullJapan)
-        guard !isBusy else { return }
-        guard modules.first(where: { $0.module == module })?.canApply == true else {
-            operationResult = nil; comparisons = []
-            errorMessage = "\(module.title) is unsupported or has incomplete prerequisites. No persistent write was attempted."
-            return
+        guard let status = modules.first(where: { $0.module == module }), restore ? status.canRestore : status.canApply else {
+            errorMessage = "\(module.title): no supported layout, writable path or compatible backup."
+            return false
         }
-        run(refreshActivation: module == .mobileActivation || module == .fullJapan) {
-            let plans: [RegionWritePlan]
-            if module == .mobileActivation {
-                let raw = try fileAccess.read(.mobileActivation)
-                try activation.validateRegionData(raw)
-                plans = [try RegionModuleMutation.activationPlan(raw: raw)]
-            } else if module == .fullJapan {
-                plans = try fullPlans()
-            } else {
-                let raw = try fileAccess.read(.mobileGestalt)
-                let root = try RegionPlist.parse(raw).root
-                let assessments = RegionCacheMapping.assess(plist: root, build: build,
-                    image: RegionCacheMapping.loadedImage(), writeAccess: (gestalt.cacheWriteAccessStatus()["writable"] as? NSNumber)?.boolValue == true, productType: productType)
-                plans = [try RegionModuleMutation.plan(module: module, raw: raw, productType: productType, assessments: assessments)]
-            }
+        isBusy = true; errorMessage = nil; operationResult = nil; comparisons = []
+        var failure: String?
+        do {
+            let store = try coordinator()
+            let plans = try (restore ? store.restorePlans(module: module) : applyPlans(module))
             comparisons = plans.flatMap(\.comparison)
-            return try coordinator().apply(module: module, plans: plans)
+            prepared = try store.prepare(module: module, plans: plans, operation: restore ? "restore" : "apply")
+            if prepared == nil { operationResult = RegionTransactionCoordinator.unchangedMessage }
+        } catch { failure = error.localizedDescription }
+        isBusy = false
+        refresh()
+        if let failure { errorMessage = failure }
+        return prepared != nil
+    }
+
+    func confirmPrepared() {
+        guard !isBusy, let journal = prepared else { return }
+        prepared = nil
+        run(refreshActivation: journal.module == .mobileActivation || journal.module == .fullJapan) {
+            try coordinator().commitPrepared(journal.id)
         }
     }
 
-    func restore(_ module: RegionModule) {
-        refresh(includeActivation: module == .mobileActivation || module == .fullJapan)
-        guard !isBusy, modules.first(where: { $0.module == module })?.canRestore == true else {
-            operationResult = nil; comparisons = []
-            errorMessage = "No compatible original backup or writable restore path is available."
-            return
+    func cancelPrepared() {
+        guard !isBusy, let journal = prepared else { return }
+        prepared = nil
+        run { try coordinator().cancelPrepared(journal.id); return "Cancelled. No system file was written." }
+    }
+
+    func apply(_ module: RegionModule) { if prepare(module) { confirmPrepared() } }
+    func restore(_ module: RegionModule) { if prepare(module, restore: true) { confirmPrepared() } }
+
+    private func applyPlans(_ module: RegionModule) throws -> [RegionWritePlan] {
+        if module == .mobileActivation {
+            let raw = try fileAccess.read(.mobileActivation)
+            try activation.validateRegionData(raw)
+            return [try RegionModuleMutation.activationPlan(raw: raw)]
         }
-        run(refreshActivation: module == .mobileActivation || module == .fullJapan) {
-            try coordinator().restore(module: module) { self.comparisons = $0.flatMap(\.comparison) }
-        }
+        if module == .fullJapan { return try fullPlans() }
+        let raw = try fileAccess.read(.mobileGestalt)
+        return [try RegionModuleMutation.plan(module: module, raw: raw, productType: productType, build: build)]
     }
 
     func recover() { run { try coordinator().recoverPending() } }
@@ -249,7 +276,7 @@ final class RegionIdentityService: ObservableObject {
         let extra = parsed.root["CacheExtra"] as? [String: Any] ?? [:]
         let scope = RegionPatchScope(extraKeys: [JapanRegionMutation.regionCodeKey,
             try RegionModuleMutation.identityKey(.regionInfo, extra: extra), JapanRegionMutation.regulatoryModelKey],
-            byteOffsets: layout.fields.flatMap { Array(($0.slot * 8)..<($0.slot * 8 + 8)) + [layout.slotCount * 8 + $0.slot] },
+            byteOffsets: layout.fields.map { $0.slot * 8 },
             cacheUUID: parsed.root["CacheUUID"] as? String, cacheVersion: parsed.root["CacheVersion"] as? String,
             cacheLength: (parsed.root["CacheData"] as? Data)?.count)
         let after = RegionPlist.equal(parsed.root, modified) ? mg :

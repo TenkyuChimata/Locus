@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Synthetic fixtures only. These reviews never enter the production registry.
+// Synthetic cache data only; no device access or Apple binary fixtures.
 import Foundation
 
 var checks = 0
@@ -15,17 +15,17 @@ func encode(_ root: [String: Any], format: PropertyListSerialization.PropertyLis
 }
 func root(_ bytes: Data) -> [String: Any] { try! RegionPlist.parse(bytes).root }
 func extra(_ bytes: Data) -> [String: Any] { root(bytes)["CacheExtra"] as! [String: Any] }
-let uuid = "00000000-0000-4000-8000-000000000001"
-let binary = "00000000-0000-4000-8000-000000000002"
-let build = "fixture-build"
+let uuid = "48CB1FAC-755B-435F-9A01-A20E5D810EA9"
+let build = "24B119"
 let profile = "iPhone18,3"
 let code = JapanRegionMutation.regionCodeKey, info = RegionModuleMutation.regionInfoKeys[0]
 let modernInfo = RegionModuleMutation.regionInfoKeys[1], ai = RegionModuleMutation.intelligenceKey
 let model = JapanRegionMutation.regulatoryModelKey
 var baseline: [String: Any] = ["CacheExtra": [code: "CH", info: "CH/A", model: "A9999", "hardware": "preserve", "number": 512] as [String: Any],
-    "CacheUUID": uuid, "CacheVersion": build, "CacheData": Data(repeating: 0, count: 72), "other": [1, 2, 3]]
+    "CacheUUID": uuid, "CacheVersion": build, "CacheData": Data(repeating: 0, count: 6480), "other": [1, 2, 3]]
 var baselineData = baseline["CacheData"] as! Data
-for slot in [1, 3, 5] { baselineData[64 + slot] = 1 }
+for slot in [383, 506, 694] { baselineData[5760 + slot] = 1 }
+baselineData[383 * 8] = 1; baselineData[694 * 8] = 1
 baseline["CacheData"] = baselineData
 let baselineBytes = encode(baseline)
 
@@ -80,210 +80,50 @@ for bad in [NSNumber(value: 2), NSNumber(value: -1), NSNumber(value: 0.5), NSNum
     rejects { _ = try RegionModuleMutation.plan(module: .intelligence, raw: encode(fixture), productType: profile) }
 }
 
-func put(_ value: UInt64, into data: inout Data, at offset: Int, size: Int) {
-    for i in 0..<size { data[offset + i] = UInt8(truncatingIfNeeded: value >> (i * 8)) }
+func assess(_ fixture: [String: Any] = baseline, writable: Bool = true) -> [CacheMappingAssessment] {
+    RegionCacheMapping.assess(plist: fixture, build: build, writeAccess: writable, productType: profile)
 }
-let keys = RegionCacheQuestion.allCases.map(\.key) + ["AAAAAAAAAAAAAAAAAAAAAA"]
-var strings = Data(), addresses: [UInt64] = []
-for key in keys { addresses.append(0x1000 + UInt64(strings.count)); strings.append(Data((key + "\0").utf8)) }
-strings.append(Data((uuid + "\0").utf8))
-var descriptors = Data(repeating: 0, count: 256)
-let slots = [1, 3, 5, 7]
-for i in 0..<4 {
-    put(addresses[i], into: &descriptors, at: i * 64, size: 8)
-    descriptors[i * 64 + 0x38] = i == 2 ? 0x1C : 0x19
-    put(UInt64(slots[i]), into: &descriptors, at: i * 64 + 0x3A, size: 2)
-    put(i == 3 ? 4 : 11, into: &descriptors, at: i * 64 + 0x3C, size: 4)
+expect(assess().allSatisfy(\.permitsMutation))
+expect(assess(writable: false).allSatisfy { $0.status == .readOnly && !$0.permitsMutation })
+for (key, value) in [("CacheUUID", "00000000-0000-4000-8000-000000000001"), ("CacheVersion", "stale")] {
+    var changed = baseline; changed[key] = value
+    expect(assess(changed).allSatisfy { !$0.permitsMutation })
 }
-func image(_ data: Data = descriptors, _ text: Data = strings) -> [String: Any] {
-    ["binaryUUID": binary, "source": "current process loaded image",
-     "pointerRepresentation": "dyld-resolved key addresses", "cpuType": NSNumber(value: 0x0100000C),
-     "cpuSubtype": NSNumber(value: 2), "sections": [["name": "__TEXT.__cstring", "address": NSNumber(value: 0x1000), "data": text],
-        ["name": "__AUTH_CONST.__const", "address": NSNumber(value: 0x8000), "data": data]]]
+for (product, version) in [("iPhone18,3", "24B120"), ("iPhone18,2", build)] {
+    expect(RegionCacheMapping.assess(plist: baseline, build: version, writeAccess: true, productType: product).allSatisfy { !$0.permitsMutation })
 }
-let review = ReviewedCacheSchema(binaryUUID: binary, cacheUUID: uuid, build: build, byteCount: 72, productType: profile, systemVersion: "fixture-os",
-    descriptors: Dictionary(uniqueKeysWithValues: RegionCacheQuestion.allCases.enumerated().map {
-        ($0.element, CacheDescriptor(section: "__AUTH_CONST.__const", offset: $0.offset * 64, slot: slots[$0.offset], type: 11, flags: $0.offset == 2 ? 0x1C : 0x19))
-    }), evidence: "SYNTHETIC TEST ONLY", runtimeEvidence: "SIMULATED BINDING ONLY")
-func assess(_ fixture: [String: Any] = baseline, _ snapshot: [String: Any] = image(), reviewed: Bool = false, writable: Bool = true) -> [CacheMappingAssessment] {
-    RegionCacheMapping.assess(plist: fixture, build: build, image: snapshot, writeAccess: writable, reviews: reviewed ? [review] : [], productType: profile, systemVersion: "fixture-os")
+for size in [0, 6479, 6489] {
+    var changed = baseline; changed["CacheData"] = Data(repeating: 0, count: size)
+    expect(assess(changed).allSatisfy { !$0.permitsMutation })
 }
-expect(assess().allSatisfy { $0.status == .structurallyValid && !$0.permitsMutation })
-expect(assess(reviewed: true, writable: false).allSatisfy { $0.status == .binaryVerified })
-let authorized = assess(reviewed: true)
-expect(authorized.allSatisfy(\.permitsMutation))
-expect(RegionCacheMapping.reviewed.isEmpty)
-for (key, value) in [("CacheUUID", binary), ("CacheVersion", "stale")] {
-    var mismatched = baseline; mismatched[key] = value
-    rejects { _ = try RegionModuleMutation.plan(module: .greenTea, raw: encode(mismatched), productType: profile, assessments: authorized) }
+for offset in [383 * 8, 383 * 8 + 1, 5760 + 383] {
+    var changed = baseline, data = baselineData
+    data[offset] = 2; changed["CacheData"] = data
+    expect(!assess(changed)[0].permitsMutation)
+    rejects { _ = try RegionModuleMutation.plan(module: .greenTea, raw: encode(changed), productType: profile, build: build) }
 }
-var rebound = baseline; rebound["CacheData"] = Data(repeating: 0, count: 81)
-rejects { _ = try RegionModuleMutation.plan(module: .greenTea, raw: encode(rebound), productType: profile, assessments: authorized) }
-rebound = baseline; rebound["CacheExtra"] = [RegionCacheQuestion.greenTea.key: true]
-rejects { _ = try RegionModuleMutation.plan(module: .greenTea, raw: encode(rebound), productType: profile, assessments: authorized) }
-rejects { _ = try RegionModuleMutation.plan(module: .greenTea, raw: baselineBytes, productType: profile, assessments: authorized + authorized) }
-let booleanPlan = try RegionModuleMutation.plan(module: .notGreenTea, raw: baselineBytes, productType: profile, assessments: authorized)
-for byte in [3 * 8, 3 * 8 + 1, 64 + 3] {
-    var wrong = root(booleanPlan.after), bytes = wrong["CacheData"] as! Data
-    bytes[byte] = 2; wrong["CacheData"] = bytes
-    rejects { try booleanPlan.scope.validate(before: booleanPlan.before, after: encode(wrong)) }
+var invalid = baseline, invalidData = baselineData
+invalidData[5760 + 383] = 0; invalid["CacheData"] = invalidData
+expect(!assess(invalid)[0].permitsMutation)
+for alias in [RegionCacheQuestion.wapi.key, "wapi"] {
+    var changed = baseline; changed["CacheExtra"] = [alias: true]
+    expect(!assess(changed)[2].permitsMutation)
+    expect(assess(changed)[0].permitsMutation, "Each cache option remains independent")
 }
-for module in [RegionModule.greenTea, .notGreenTea, .wapi] {
-    var fixture = baseline, data = fixture["CacheData"] as! Data
-    let index = slots[RegionCacheQuestion.allCases.firstIndex(of: module.question!)!]
-    data[index * 8] = 1 // Same green-tea/wapi values do not determine the mapping.
-    data[56] = 99 // Unrelated non-Boolean slot.
-    fixture["CacheData"] = data
+for (module, slot) in zip([RegionModule.greenTea, .notGreenTea, .wapi], [383, 506, 694]) {
+    var fixture = baseline, data = baselineData
+    data[56] = 99; fixture["CacheData"] = data
     let raw = encode(fixture)
-    let plan = try RegionModuleMutation.plan(module: module, raw: raw, productType: profile, assessments: assess(fixture, reviewed: true))
-    expect(plan.scope.byteOffsets.count == 9)
+    let plan = try RegionModuleMutation.plan(module: module, raw: raw, productType: profile, build: build)
+    expect(plan.scope.byteOffsets == [slot * 8])
+    let afterData = root(plan.after)["CacheData"] as! Data
+    expect(Set(data.indices.filter { data[$0] != afterData[$0] }) == [slot * 8])
     expect(try plan.scope.restoring(original: raw, applied: plan.after, current: plan.after) == raw)
     expect((root(plan.after)["CacheData"] as! Data)[56] == 99)
-    var unrelated = root(plan.after), corrupt = unrelated["CacheData"] as! Data
-    corrupt[40] ^= 1; unrelated["CacheData"] = corrupt
-    if index != 5 { rejects { try plan.scope.validate(before: raw, after: encode(unrelated)) } }
-    rejects { _ = try RegionModuleMutation.plan(module: module, raw: raw, productType: profile, assessments: assess(fixture)) }
+    var unrelated = root(plan.after), bytes = unrelated["CacheData"] as! Data
+    bytes[40] ^= 1; unrelated["CacheData"] = bytes
+    rejects { try plan.scope.validate(before: raw, after: encode(unrelated)) }
 }
-var changed = baseline; changed["CacheUUID"] = binary
-expect(assess(changed, reviewed: true).allSatisfy { !$0.permitsMutation })
-changed = baseline; changed["CacheVersion"] = "stale"
-expect(assess(changed, reviewed: true).allSatisfy { !$0.permitsMutation })
-var wrongImage = image(); wrongImage["binaryUUID"] = uuid
-expect(assess(baseline, wrongImage, reviewed: true).allSatisfy { $0.status == .structurallyValid })
-for offset in [8, 9, 8 * 8 + 1, 71] {
-    changed = baseline; var bytes = changed["CacheData"] as! Data
-    bytes[offset] = 2; changed["CacheData"] = bytes
-    expect(!assess(changed, reviewed: true)[0].permitsMutation)
-}
-for size in [0, 8, 71, 73] {
-    changed = baseline; changed["CacheData"] = Data(repeating: 0, count: size)
-    expect(assess(changed, reviewed: true).allSatisfy { !$0.permitsMutation })
-}
-for type in [0, 1, 12] {
-    var data = descriptors; put(UInt64(type), into: &data, at: 128 + 0x3C, size: 4)
-    let results = assess(baseline, image(data))
-    expect(results[0].status == .structurallyValid && results[2].status == .candidate)
-}
-for index in [8, 32767, 65535] {
-    var data = descriptors; put(UInt64(index), into: &data, at: 128 + 0x3A, size: 2)
-    expect(assess(baseline, image(data), reviewed: true)[2].status == .candidate)
-}
-var collision = descriptors; put(1, into: &collision, at: 128 + 0x3A, size: 2)
-expect(assess(baseline, image(collision))[0].status == .candidate)
-expect(assess(baseline, image(collision))[1].status == .structurallyValid)
-var duplicate = descriptors; duplicate.append(descriptors.prefix(64))
-expect(assess(baseline, image(duplicate))[0].status == .candidate)
-expect(assess(baseline, image(descriptors, strings + Data((binary + "\0").utf8))).allSatisfy { $0.status == .candidate })
-expect(assess(baseline, image(descriptors, strings + Data((uuid + "\0").utf8))).allSatisfy { $0.status == .candidate })
-expect(assess(baseline, image(Data(repeating: 0, count: 63))).allSatisfy { $0.status == .unavailable })
-changed = baseline; changed["CacheExtra"] = [RegionCacheQuestion.wapi.key: true]
-expect(assess(changed, reviewed: true)[2].status == .candidate)
-expect(assess(changed, reviewed: true)[0].permitsMutation)
-var overlap = image(); var overlapping = overlap["sections"] as! [[String: Any]]
-overlapping[1]["address"] = NSNumber(value: 0x1000); overlap["sections"] = overlapping
-expect(assess(baseline, overlap).allSatisfy { $0.status == .unavailable })
-var overflow = image(); var overflowing = overflow["sections"] as! [[String: Any]]
-overflowing[0]["address"] = NSNumber(value: UInt64.max); overflow["sections"] = overflowing
-expect(assess(baseline, overflow).allSatisfy { $0.status == .unavailable })
-var withSmallSection = image(), smallSections = withSmallSection["sections"] as! [[String:Any]]
-smallSections.append(["name": "__DATA.__const", "address": NSNumber(value: 0x9000), "data": Data(repeating: 0, count: 8)])
-withSmallSection["sections"] = smallSections
-expect(assess(baseline, withSmallSection).allSatisfy { $0.status == .structurallyValid })
-
-// Runtime keys must already be resolved. Neither PAC-looking bits nor on-disk
-// cache-chain words may be silently converted into a writable runtime match.
-for highBits in [UInt64(0xABCD_0000_0000_0000), UInt64(0x0010_0000_0000_0000)] {
-    var unresolved = descriptors
-    for i in 0..<4 { put(addresses[i] | highBits, into: &unresolved, at: i * 64, size: 8) }
-    expect(assess(baseline, image(unresolved), reviewed: true).allSatisfy { !$0.permitsMutation && $0.descriptor == nil })
-}
-for delta in [Int64(-0x800), Int64(0x100000)] {
-    var relocated = descriptors
-    for i in 0..<4 { put(UInt64(Int64(addresses[i]) + delta), into: &relocated, at: i * 64, size: 8) }
-    var snapshot = image(relocated), sections = image(relocated)["sections"] as! [[String: Any]]
-    sections[0]["address"] = NSNumber(value: Int64(0x1000) + delta)
-    sections[1]["address"] = NSNumber(value: Int64(0x8000) + delta)
-    snapshot["sections"] = sections
-    expect(assess(baseline, snapshot, reviewed: true).allSatisfy(\.permitsMutation), "Section offsets survive ASLR")
-}
-for (key, value) in [("source", "offline extracted image"), ("pointerRepresentation", "unknown")] {
-    var snapshot = image(); snapshot[key] = value
-    expect(assess(baseline, snapshot, reviewed: true).allSatisfy { !$0.permitsMutation })
-}
-for (key, value) in [("cpuType", 7), ("cpuSubtype", 0)] {
-    var snapshot = image(); snapshot[key] = NSNumber(value: value)
-    expect(assess(baseline, snapshot, reviewed: true).allSatisfy { !$0.permitsMutation })
-}
-for product in ["", "iPhone17,3", "unknown"] {
-    expect(RegionCacheMapping.assess(plist: baseline, build: build, image: image(), writeAccess: true,
-        reviews: [review], productType: product, systemVersion: "fixture-os").allSatisfy { !$0.permitsMutation })
-    rejects { _ = try RegionModuleMutation.plan(module: .wapi, raw: baselineBytes, productType: product, assessments: authorized) }
-}
-expect(RegionCacheMapping.assess(plist: baseline, build: build, image: image(), writeAccess: true,
-    reviews: [review], productType: profile, systemVersion: "unsupported-os").allSatisfy { !$0.permitsMutation })
-let offlineOnlyReview = ReviewedCacheSchema(binaryUUID: binary, cacheUUID: uuid, build: build, byteCount: 72,
-    productType: profile, systemVersion: "fixture-os", descriptors: review.descriptors,
-    evidence: "OFFLINE ONLY", runtimeEvidence: "")
-expect(RegionCacheMapping.assess(plist: baseline, build: build, image: image(), writeAccess: true,
-    reviews: [offlineOnlyReview], productType: profile, systemVersion: "fixture-os").allSatisfy { !$0.permitsMutation })
-var changedFlags = descriptors; changedFlags[0x38] = 0x1C
-expect(!assess(baseline, image(changedFlags), reviewed: true)[0].permitsMutation)
-var invalidated = baseline, invalidData = baseline["CacheData"] as! Data
-invalidData[65] = 0; invalidated["CacheData"] = invalidData
-expect(!assess(invalidated, reviewed: true)[0].permitsMutation, "Invalid slots can be recomputed")
-rejects { _ = try RegionModuleMutation.plan(module: .greenTea, raw: encode(invalidated), productType: profile, assessments: authorized) }
-for flag in [UInt8(2), UInt8(3), UInt8(255)] {
-    invalidData[65] = flag; invalidated["CacheData"] = invalidData
-    expect(!assess(invalidated, reviewed: true)[0].permitsMutation)
-}
-for override in [RegionCacheQuestion.wapi.key, RegionCacheQuestion.wapi.rawValue] {
-    var overridden = baseline; overridden["CacheExtra"] = [override: true]
-    expect(!assess(overridden, reviewed: true)[2].permitsMutation)
-}
-var stale = baseline, staleData = baseline["CacheData"] as! Data
-staleData[1 * 8] = 1; stale["CacheData"] = staleData
-rejects { _ = try RegionModuleMutation.plan(module: .greenTea, raw: encode(stale), productType: profile, assessments: authorized) }
-
-// Exact-version synthetic loaded image, with the real section-relative offsets
-// but no Apple bytes or live device assertions. The production registry is empty.
-let exactBinary = "9F28583A-0C54-304C-BE18-C12F593AC826"
-let exactCache = "48CB1FAC-755B-435F-9A01-A20E5D810EA9"
-let exactSlots = [383, 506, 694], exactOffsets = [0xDCB0, 0x71F0, 0x12EB0]
-var exactStrings = Data(), exactDescriptors = Data(repeating: 0, count: 0x25C28)
-var exactData = Data(repeating: 0, count: 6480)
-for (i, question) in RegionCacheQuestion.allCases.enumerated() {
-    put(0x1AFF00000 + UInt64(exactStrings.count), into: &exactDescriptors, at: exactOffsets[i], size: 8)
-    exactStrings.append(Data((question.key + "\0").utf8))
-    exactDescriptors[exactOffsets[i] + 0x38] = i == 2 ? 0x1C : 0x19
-    put(UInt64(exactSlots[i]), into: &exactDescriptors, at: exactOffsets[i] + 0x3A, size: 2)
-    put(11, into: &exactDescriptors, at: exactOffsets[i] + 0x3C, size: 4)
-    exactData[5760 + exactSlots[i]] = 1
-}
-exactStrings.append(Data((exactCache + "\0").utf8))
-let exactPlist: [String: Any] = ["CacheUUID": exactCache, "CacheVersion": "24B119",
-    "CacheData": exactData, "CacheExtra": [:] as [String: Any]]
-func exactImage(_ data: Data = exactDescriptors) -> [String: Any] {
-    ["binaryUUID": exactBinary, "source": "current process loaded image",
-     "pointerRepresentation": "dyld-resolved key addresses", "cpuType": NSNumber(value: 0x0100000C), "cpuSubtype": NSNumber(value: 2),
-     "sections": [["name": "__TEXT.__cstring", "address": NSNumber(value: UInt64(0x1AFF00000)), "data": exactStrings],
-                  ["name": "__AUTH_CONST.__const", "address": NSNumber(value: UInt64(0x1E5525428)), "data": data]]]
-}
-let exactAssessment = RegionCacheMapping.assess(plist: exactPlist, build: "24B119", image: exactImage(),
-    writeAccess: true, productType: "iPhone18,3", systemVersion: "27.2")
-expect(exactAssessment.map { $0.descriptor!.slot } == exactSlots)
-expect(exactAssessment.allSatisfy { $0.status == .structurallyValid && !$0.permitsMutation })
-rejects { _ = try RegionModuleMutation.plan(module: .wapi, raw: encode(exactPlist), productType: "iPhone18,3", assessments: exactAssessment) }
-let exactLayout = JapanRegionCacheLayout(size: 6480, slotCount: 720,
-    fields: RegionCacheQuestion.allCases.enumerated().map { .init(question: $0.element.rawValue, slot: exactSlots[$0.offset], value: $0.element.target) })
-var opposite = exactData
-for slot in [383, 694] { opposite[slot * 8] = 1 }
-let exactChanged = try exactLayout.applying(to: opposite)
-expect(Set(opposite.indices.filter { opposite[$0] != exactChanged[$0] }) == [0xBF8, 0xFD0, 0x15B0])
-for historical in [382, 505, 693] { expect(exactChanged[historical * 8] == opposite[historical * 8]) }
-var historicalDescriptors = exactDescriptors
-for i in 0..<3 { put(UInt64(exactSlots[i] - 1), into: &historicalDescriptors, at: exactOffsets[i] + 0x3A, size: 2) }
-expect(RegionCacheMapping.assess(plist: exactPlist, build: "24B119", image: exactImage(historicalDescriptors),
-    writeAccess: true, productType: profile, systemVersion: "27.2").allSatisfy { !$0.permitsMutation })
 
 final class MemoryAccess: RegionFileAccess {
     var data: [RegionFile: Data]
@@ -306,11 +146,10 @@ let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("L
 try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
 defer { try? FileManager.default.removeItem(at: temporary) }
 func store(_ access: MemoryAccess, _ name: String) -> RegionTransactionCoordinator {
-    .init(root: temporary.appendingPathComponent(name), access: access, productType: profile, build: build,
-          cacheImage: { image() }, cacheReviews: [review], cacheSystemVersion: "fixture-os")
+    .init(root: temporary.appendingPathComponent(name), access: access, productType: profile, build: build)
 }
 func plan(_ module: RegionModule, _ bytes: Data) throws -> RegionWritePlan {
-    try RegionModuleMutation.plan(module: module, raw: bytes, productType: profile)
+    try RegionModuleMutation.plan(module: module, raw: bytes, productType: profile, build: build)
 }
 let access = MemoryAccess([.mobileGestalt: baselineBytes])
 let coordinator = store(access, "independence")
@@ -347,30 +186,30 @@ let maPlan = try RegionModuleMutation.activationPlan(raw: maOriginal)
 let mgPlan = try plan(.regionCode, baselineBytes)
 // The coordinator only permits complete fixed-whitelist full plans.
 var fullOffsets: [Int] = []
-for slot in [1, 3, 5] { fullOffsets += Array((slot * 8)..<(slot * 8 + 8)) + [64 + slot] }
+for slot in [383, 506, 694] { fullOffsets.append(slot * 8) }
 let fullScope = RegionPatchScope(extraKeys: [code, info, model], byteOffsets: fullOffsets,
-    cacheUUID: uuid, cacheVersion: build, cacheLength: 72)
+    cacheUUID: uuid, cacheVersion: build, cacheLength: 6480)
 var fullRoot = baseline
 for module in [RegionModule.regionCode, .regionInfo, .regulatoryModel] { fullRoot = root(try plan(module, encode(fullRoot)).after) }
 for module in [RegionModule.greenTea, .notGreenTea, .wapi] {
     fullRoot = root(try RegionModuleMutation.plan(module: module, raw: encode(fullRoot), productType: profile,
-        assessments: assess(fullRoot, reviewed: true)).after)
+        build: build).after)
 }
 let fullMG = RegionWritePlan(file: .mobileGestalt, before: baselineBytes, after: encode(fullRoot), scope: fullScope)
 let unreviewedIO = MemoryAccess([.mobileGestalt: baselineBytes, .mobileActivation: maOriginal])
 let unreviewedStore = RegionTransactionCoordinator(root: temporary.appendingPathComponent("unreviewed-plan"),
-    access: unreviewedIO, productType: profile, build: build)
+    access: unreviewedIO, productType: profile, build: "24B120")
 rejects { _ = try unreviewedStore.apply(module: .fullJapan, plans: [maPlan, fullMG]) }
-expect(unreviewedIO.events.isEmpty, "A structurally valid byte scope is not mutation authority")
+expect(unreviewedIO.events.isEmpty, "An unknown build cannot use a matching byte scope")
 let guessedIO = MemoryAccess([.mobileGestalt: baselineBytes])
 let guessedStore = store(guessedIO, "guessed-slot")
 var guessedRoot = baseline, guessedData = baseline["CacheData"] as! Data
 guessedData[2 * 8] = 1; guessedRoot["CacheData"] = guessedData
 let guessedScope = RegionPatchScope(byteOffsets: Array(16..<24) + [66],
-    cacheUUID: uuid, cacheVersion: build, cacheLength: 72)
+    cacheUUID: uuid, cacheVersion: build, cacheLength: 6480)
 let guessedPlan = RegionWritePlan(file: .mobileGestalt, before: baselineBytes, after: encode(guessedRoot), scope: guessedScope)
 rejects { _ = try guessedStore.apply(module: .greenTea, plans: [guessedPlan]) }
-expect(guessedIO.events.isEmpty, "An authorized schema cannot authorize another slot's plan")
+expect(guessedIO.events.isEmpty, "A known layout cannot authorize another slot's plan")
 let incompleteIO = MemoryAccess([.mobileGestalt: baselineBytes, .mobileActivation: maOriginal])
 let incompleteStore = store(incompleteIO, "incomplete-full")
 rejects { _ = try incompleteStore.apply(module: .fullJapan, plans: [maPlan]) }
@@ -542,4 +381,4 @@ rejects { _ = try failedBackup.apply(module: .regionCode, plans: [mgPlan]) }
 expect(forbiddenIO.events.isEmpty)
 expect(RegionBackupDigest.sha256(Data()) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
 expect(RegionBackupDigest.sha256(Data("abc".utf8)) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
-print("PASS: \(checks) actual Swift module, descriptor, whitelist, backup, restore, rollback and interruption checks (synthetic host data only)")
+print("PASS: \(checks) actual Swift module, layout, whitelist, backup, restore, rollback and interruption checks (synthetic host data only)")

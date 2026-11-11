@@ -122,6 +122,13 @@ nonisolated struct RegionPatchScope: Codable, Equatable, Sendable {
         let before = try RegionPlist.parse(original).root
         let expected = try RegionPlist.parse(applied).root
         let parsed = try RegionPlist.parse(current)
+        let oldExtra = before["CacheExtra"] as? [String: Any] ?? [:]
+        let liveExtra = parsed.root["CacheExtra"] as? [String: Any] ?? [:]
+        for key in ["re6Zb+zwFKJNlkQTUeT+/w", "VasUgeSzVyHdB27g2XpN0g"] {
+            guard RegionPlist.equal(oldExtra[key], liveExtra[key]) else {
+                throw RegionOperationError("Backup device identity differs from the current cache.")
+            }
+        }
         var root = parsed.root
         if !extraKeys.isEmpty {
             guard var extra = root["CacheExtra"] as? [String: Any],
@@ -168,15 +175,19 @@ struct RegionWritePlan {
     let scope: RegionPatchScope
 
     var comparison: [String] {
-        var rows = ["\(file.rawValue): SHA-256 \(RegionBackupDigest.sha256(before)) → \(RegionBackupDigest.sha256(after))"]
+        var rows: [String] = []
         guard let a = try? RegionPlist.parse(before).root, let b = try? RegionPlist.parse(after).root else { return rows }
         func display(_ value: Any?) -> String { value.map { String(describing: $0) } ?? "<absent>" }
         let ea = a["CacheExtra"] as? [String:Any] ?? [:], eb = b["CacheExtra"] as? [String:Any] ?? [:]
         rows += scope.extraKeys.map { "CacheExtra \($0): \(display(ea[$0])) → \(display(eb[$0]))" }
         rows += scope.rootKeys.map { "\(file.rawValue) \($0): \(display(a[$0])) → \(display(b[$0]))" }
         if let da = a["CacheData"] as? Data, let db = b["CacheData"] as? Data {
-            rows += scope.byteOffsets.filter { da.indices.contains($0) && db.indices.contains($0) && da[$0] != db[$0] }
-                .map { "CacheData[0x\(String($0, radix: 16))]: \(da[$0]) → \(db[$0])" }
+            let slots = da.count / 9
+            rows += scope.byteOffsets.filter { $0 < slots * 8 && $0.isMultiple(of: 8) && db.indices.contains($0) }
+                .map { offset in
+                    let name = RegionCacheMapping.question(atValueOffset: offset)?.rawValue ?? "CacheData[\(offset)]"
+                    return "\(name): \(da[offset] == 1) → \(db[offset] == 1)"
+                }
         }
         return rows
     }
@@ -227,16 +238,16 @@ enum RegionModuleMutation {
     }
 
     static func plan(module: RegionModule, raw: Data, productType: String,
-                     assessments: [CacheMappingAssessment] = []) throws -> RegionWritePlan {
+                     build: String = "") throws -> RegionWritePlan {
         let parsed = try RegionPlist.parse(raw)
         var root = parsed.root
         var scope = RegionPatchScope()
         if let question = module.question {
             guard let data = root["CacheData"] as? Data else { throw JapanRegionError.missingCacheData }
-            let layout = try RegionCacheMapping.layout(for: question, assessments: assessments, plist: root, productType: productType)
+            let layout = try RegionCacheMapping.layout(plist: root, build: build, productType: productType, questions: [question])
             root["CacheData"] = try layout.applying(to: data)
             let slot = layout.fields[0].slot
-            scope.byteOffsets = Array((slot * 8)..<(slot * 8 + 8)) + [layout.slotCount * 8 + slot]
+            scope.byteOffsets = [slot * 8]
             scope.cacheUUID = root["CacheUUID"] as? String
             scope.cacheVersion = root["CacheVersion"] as? String
             scope.cacheLength = data.count

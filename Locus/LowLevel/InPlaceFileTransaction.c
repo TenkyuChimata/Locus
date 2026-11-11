@@ -44,6 +44,9 @@ static int LocusSameInode(int fd, const char *path)
 
 static int LocusWriteExact(int fd, const void *data, size_t size)
 {
+    // Preserve the privileged file's inode. This is NOT crash/power-loss
+    // atomic: termination between truncation and fsync can leave a torn plist.
+    // Durable backups precede entry; rollback below is best effort while alive.
     if (ftruncate(fd, 0) || lseek(fd, 0, SEEK_SET) < 0) return errno;
     const unsigned char *bytes = data;
     size_t offset = 0;

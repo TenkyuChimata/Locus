@@ -13,10 +13,10 @@ struct RegionIdentityView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Real Device / Loaded Binary") {
+                Section("Device") {
                     value("ProductType", service.productType)
                     value("OS Build", service.build)
-                    value("MobileGestalt LC_UUID", service.binaryUUID)
+                    value("CacheUUID", service.cacheUUID)
                 }
                 moduleSection("Region Identity", [.regionCode, .regionInfo, .regulatoryModel])
                 moduleSection("Region Cache Behaviors", [.greenTea, .notGreenTea, .wapi])
@@ -48,11 +48,10 @@ struct RegionIdentityView: View {
                 if let error = service.errorMessage {
                     Section("Error") { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
                 }
-                Section("Verification After Restart") {
-                    Text("Fully restart the device, reopen Locus, refresh Diagnostics and compare runtime answers. Test each feature separately. A cache write or a matching MGCopyAnswer does not establish functional availability.")
-                    Text("Apple Intelligence: record the capability flag, Settings visibility, model download and actual service use as four separate results. Hardware, account, language and server restrictions may still apply.")
-                    Text("Original means the exact value before this module's first Locus edit. An existing J/A value is never assumed to be the factory value. Existing transaction backups are retained.")
-                }.font(.caption)
+                Section {
+                    Text("Restart the device and test the affected feature after applying. Readback confirms file contents; in-place writes are not power-loss atomic.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             .navigationTitle("Japan Region")
             .toolbar {
@@ -60,21 +59,19 @@ struct RegionIdentityView: View {
                     .disabled(service.isBusy).accessibilityLabel("Refresh Region Modules")
             }
             .task { service.refresh() }
-            .sheet(item: $action) { pending in
+            .sheet(item: $action, onDismiss: { service.cancelPrepared() }) { pending in
                 NavigationStack {
                     List {
-                        if let status = service.modules.first(where: { $0.module == pending.module }) {
-                            value("Current Cache Value", status.cache)
-                            value("Current Runtime Value", status.runtime)
-                            value("Expected Value", pending.restore ? "Exact saved pre-Locus value" : status.expected)
-                            Text("Complete original bytes and SHA-256 checksums are saved before writing. Only this module's allowed keys or bytes may change. Restore preserves other modules. A full device restart is required for independent runtime verification.")
-                                .font(.caption)
+                        Section("Changes") {
+                            ForEach(service.comparisons, id: \.self) { Text($0).font(.caption).textSelection(.enabled) }
                         }
-                        Button(pending.restore ? "Restore and Verify" : "Apply and Verify", role: .destructive) {
+                        Text("Original backup saved and verified. Only the selected fields will change. Restore preserves unrelated changes.")
+                            .font(.caption)
+                        Text("In-place writes are not crash or power-loss atomic.").font(.caption).foregroundStyle(.secondary)
+                        Button(pending.restore ? "Restore" : "Apply", role: .destructive) {
+                            service.confirmPrepared()
                             action = nil
-                            if pending.restore { service.restore(pending.module) }
-                            else { service.apply(pending.module) }
-                        }
+                        }.disabled(service.isBusy || service.prepared == nil)
                         Button("Cancel", role: .cancel) { action = nil }
                     }
                     .navigationTitle(pending.module.title).navigationBarTitleDisplayMode(.inline)
@@ -88,21 +85,25 @@ struct RegionIdentityView: View {
     }
     @ViewBuilder private func moduleRow(_ module: RegionModule) -> some View {
         if let status = service.modules.first(where: { $0.module == module }) {
-            DisclosureGroup(module.title) {
-                value("Current Cache Value", status.cache)
-                value("Current Runtime Value", status.runtime)
-                value("Expected Value", status.expected)
-                value("Mapping / Access Status", status.access)
-                value("Verification Status", status.verification)
-                value("Original Value Available", status.originalAvailable ? "Yes · pre-Locus baseline" : "No")
-                Text(status.detail).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(module.title).font(.headline)
+                value("Current", status.cache)
+                value("Target", status.expected)
+                value("Modification", status.access)
                 HStack {
-                    Button("Apply", role: .destructive) { action = .init(module: module, restore: false) }
-                        .disabled(service.isBusy || !status.canApply)
+                    Button("Review Changes") {
+                        if service.prepare(module) { action = .init(module: module, restore: false) }
+                    }.disabled(service.isBusy || !status.canApply)
                     Spacer()
-                    Button("Restore") { action = .init(module: module, restore: true) }
-                        .disabled(service.isBusy || !status.canRestore)
+                    Button("Restore") {
+                        if service.prepare(module, restore: true) { action = .init(module: module, restore: true) }
+                    }.disabled(service.isBusy || !status.canRestore)
                 }.buttonStyle(.bordered)
+                DisclosureGroup("Details") {
+                    value("Runtime", status.runtime)
+                    value("Original Backup", status.originalAvailable ? "Available" : "Not yet saved")
+                    Text(status.detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }
             }
         } else { Text(module.title).foregroundStyle(.secondary) }
     }

@@ -29,6 +29,7 @@ nonisolated struct RegionJournal: Codable, Sendable {
     let operation: String
     let productType: String
     let build: String
+    let deviceID: String? // Optional for existing journals; new device writes bind the app vendor ID.
     let created: Date
     let entries: [Entry]
     var phase: Phase
@@ -43,17 +44,11 @@ final class RegionTransactionCoordinator {
     let access: RegionFileAccess
     let productType: String
     let build: String
-    private let cacheImage: () -> [String: Any]
-    private let cacheReviews: [ReviewedCacheSchema]
-    private let cacheSystemVersion: String?
+    private let deviceID: String?
     private let fm = FileManager.default
 
-    init(root: URL, access: RegionFileAccess, productType: String, build: String,
-         cacheImage: @escaping () -> [String: Any] = { RegionCacheMapping.loadedImage() },
-         cacheReviews: [ReviewedCacheSchema] = RegionCacheMapping.reviewed,
-         cacheSystemVersion: String? = nil) {
-        self.root = root; self.access = access; self.productType = productType; self.build = build
-        self.cacheImage = cacheImage; self.cacheReviews = cacheReviews; self.cacheSystemVersion = cacheSystemVersion
+    init(root: URL, access: RegionFileAccess, productType: String, build: String, deviceID: String? = nil) {
+        self.root = root; self.access = access; self.productType = productType; self.build = build; self.deviceID = deviceID
     }
 
     func pending() throws -> [RegionJournal] {
@@ -80,24 +75,51 @@ final class RegionTransactionCoordinator {
         return true
     }
 
+    static let unchangedMessage = "Already at the requested persistent value. No write or original-value claim was made."
+
     @discardableResult
     func apply(module: RegionModule, plans: [RegionWritePlan]) throws -> String {
         Self.serial.lock(); defer { Self.serial.unlock() }
-        return try perform(module: module, plans: plans, operation: "apply")
+        guard let prepared = try prepare(module: module, plans: plans) else { return Self.unchangedMessage }
+        return try commitPrepared(prepared.id)
+    }
+
+    func restorePlans(module: RegionModule) throws -> [RegionWritePlan] {
+        Self.serial.lock(); defer { Self.serial.unlock() }
+        let saved = try plans(in: original(module))
+        return try saved.map { plan in
+            let current = try access.read(plan.file)
+            let after = try plan.scope.restoring(original: plan.before, applied: plan.after, current: current)
+            let result = RegionWritePlan(file: plan.file, before: current, after: after, scope: plan.scope)
+            try validateCachePlan(module: module, plan: result, applying: false)
+            return result
+        }
     }
 
     @discardableResult
     func restore(module: RegionModule, preview: (([RegionWritePlan]) -> Void)? = nil) throws -> String {
         Self.serial.lock(); defer { Self.serial.unlock() }
-        let journal = try original(module)
-        let saved = try plans(in: journal)
-        let restorePlans = try saved.map { plan -> RegionWritePlan in
-            let current = try access.read(plan.file)
-            let after = try plan.scope.restoring(original: plan.before, applied: plan.after, current: current)
-            return .init(file: plan.file, before: current, after: after, scope: plan.scope)
+        let plans = try restorePlans(module: module)
+        preview?(plans)
+        guard let prepared = try prepare(module: module, plans: plans, operation: "restore") else { return Self.unchangedMessage }
+        return try commitPrepared(prepared.id)
+    }
+
+    func cancelPrepared(_ id: String) throws {
+        Self.serial.lock(); defer { Self.serial.unlock() }
+        var journal = try preparedJournal(id)
+        journal.phase = .rolledBack // Prepared means no system write has started.
+        try save(journal)
+    }
+
+    private func preparedJournal(_ id: String) throws -> RegionJournal {
+        guard UUID(uuidString: id) != nil else { throw RegionOperationError("Invalid prepared transaction.") }
+        let journal = try decode(RegionJournal.self, at: root.appendingPathComponent(id).appendingPathComponent("journal.plist"))
+        try checkContext(journal)
+        guard journal.id == id, journal.phase == .prepared, ["apply", "restore"].contains(journal.operation) else {
+            throw RegionOperationError("Transaction is no longer awaiting confirmation.")
         }
-        preview?(restorePlans)
-        return try perform(module: module, plans: restorePlans, operation: "restore")
+        return journal
     }
 
     func recoverPending() throws -> String {
@@ -122,7 +144,11 @@ final class RegionTransactionCoordinator {
         return journals.isEmpty ? "No unfinished transactions." : "Closed \(unwritten) unwritten transactions without changing system files. Recovered \(recovered) written transactions with exact source readback and sync."
     }
 
-    private func perform(module: RegionModule, plans: [RegionWritePlan], operation: String) throws -> String {
+    /// Reuse the existing prepared journal for the confirmation UI. This saves
+    /// and reads back complete backups without opening a system file for writing.
+    func prepare(module: RegionModule, plans: [RegionWritePlan], operation: String = "apply") throws -> RegionJournal? {
+        Self.serial.lock(); defer { Self.serial.unlock() }
+        guard ["apply", "restore"].contains(operation) else { throw RegionOperationError("Unsupported operation.") }
         guard !productType.isEmpty, !build.isEmpty else { throw RegionOperationError("Running ProductType/build must be known before a persistent operation.") }
         guard !plans.isEmpty, Set(plans.map(\.file)).count == plans.count else { throw RegionOperationError("Missing or duplicate transaction target.") }
         try validateTargets(module: module, files: plans.map(\.file))
@@ -133,11 +159,11 @@ final class RegionTransactionCoordinator {
         for plan in plans {
             try validateAuthorization(module: module, file: plan.file, scope: plan.scope)
             try plan.scope.validate(before: plan.before, after: plan.after)
-            if operation == "apply" { try validateCachePlan(module: module, plan: plan) }
+            try validateCachePlan(module: module, plan: plan, applying: operation == "apply")
             guard try access.read(plan.file) == plan.before else { throw RegionOperationError("Source changed since planning; nothing was written.") }
         }
         guard plans.contains(where: { $0.before != $0.after }) else {
-            return "Already at the requested persistent value. No write or original-value claim was made. Runtime/function verification remains separate."
+            return nil
         }
         if operation == "apply", fm.fileExists(atPath: originalURL(module).path) {
             let saved = try self.plans(in: original(module))
@@ -153,7 +179,7 @@ final class RegionTransactionCoordinator {
         try fm.createDirectory(at: directory, withIntermediateDirectories: false)
         try sync(root)
         var journal = RegionJournal(id: id, module: module, operation: operation, productType: productType,
-            build: build, created: Date(), entries: plans.map {
+            build: build, deviceID: deviceID, created: Date(), entries: plans.map {
                 .init(file: $0.file, beforeSHA256: RegionBackupDigest.sha256($0.before),
                       afterSHA256: RegionBackupDigest.sha256($0.after), scope: $0.scope)
             }, phase: .preparing)
@@ -165,18 +191,36 @@ final class RegionTransactionCoordinator {
         _ = try self.plans(in: journal) // Hashes, exact backups and whitelist before any write.
         journal.phase = .prepared
         try save(journal)
-        if operation == "apply" && !fm.fileExists(atPath: originalURL(module).path) {
-            let originals = root.appendingPathComponent("originals", isDirectory: true)
-            try fm.createDirectory(at: originals, withIntermediateDirectories: true)
-            try sync(root)
-            try writeNew(try encode(["transaction": id]), to: originalURL(module))
-        }
+        return journal
+    }
+
+    /// Confirm the exact saved preview; never silently replan after approval.
+    func commitPrepared(_ id: String) throws -> String {
+        Self.serial.lock(); defer { Self.serial.unlock() }
+        var journal = try preparedJournal(id)
+        let plans = try self.plans(in: journal)
+        let module = journal.module, operation = journal.operation
         var attempted: [RegionWritePlan] = []
         do {
             // Check every source again after backup I/O and before the first write.
             for plan in plans {
                 guard try access.read(plan.file) == plan.before else { throw RegionOperationError("Source changed during backup; transaction refused.") }
-                if operation == "apply" { try validateCachePlan(module: module, plan: plan) }
+                try validateCachePlan(module: module, plan: plan, applying: operation == "apply")
+            }
+            if operation == "apply" {
+                if fm.fileExists(atPath: originalURL(module).path) {
+                    for previous in try self.plans(in: original(module)) {
+                        guard let current = plans.first(where: { $0.file == previous.file }) else {
+                            throw RegionOperationError("Original transaction target mismatch.")
+                        }
+                        _ = try previous.scope.restoring(original: previous.before, applied: previous.after, current: current.before)
+                    }
+                } else {
+                    let originals = root.appendingPathComponent("originals", isDirectory: true)
+                    try fm.createDirectory(at: originals, withIntermediateDirectories: true)
+                    try sync(root)
+                    try writeNew(try encode(["transaction": id]), to: originalURL(module))
+                }
             }
             journal.phase = .writing
             try save(journal)
@@ -198,6 +242,7 @@ final class RegionTransactionCoordinator {
             } catch {
                 throw RegionOperationError("\(primary)\nRecovery required: \(error.localizedDescription). Journal: \(id). Exact original backups are retained.")
             }
+            if attempted.isEmpty { throw RegionOperationError("\(primary)\nNo system write was attempted.") }
             throw RegionOperationError("\(primary)\nRollback verified for every attempted write. Journal: \(id).")
         }
     }
@@ -242,8 +287,9 @@ final class RegionTransactionCoordinator {
     }
 
     private func checkContext(_ journal: RegionJournal) throws {
-        guard journal.productType == productType, journal.build == build else {
-            throw RegionOperationError("Backup belongs to another ProductType or build. Restore requires review after a system update.")
+        guard journal.productType == productType, journal.build == build,
+              journal.deviceID == nil || journal.deviceID == deviceID else {
+            throw RegionOperationError("Backup belongs to another device or build; restore is blocked.")
         }
     }
 
@@ -257,7 +303,9 @@ final class RegionTransactionCoordinator {
                   RegionBackupDigest.sha256(after) == entry.afterSHA256 else { throw RegionOperationError("Backup checksum mismatch; no system write is authorized.") }
             try entry.scope.validate(before: before, after: after)
             try validateAuthorization(module: journal.module, file: entry.file, scope: entry.scope)
-            return .init(file: entry.file, before: before, after: after, scope: entry.scope)
+            let plan = RegionWritePlan(file: entry.file, before: before, after: after, scope: entry.scope)
+            try validateCachePlan(module: journal.module, plan: plan, applying: false)
+            return plan
         }
     }
 
@@ -269,30 +317,25 @@ final class RegionTransactionCoordinator {
         }
     }
 
-    /// A persisted byte whitelist is a recovery boundary, never new mutation
-    /// authority. Reassess the loaded image and exact source before applying.
-    /// Restore/rollback retain the original journal's bounds and byte checks.
-    private func validateCachePlan(module: RegionModule, plan: RegionWritePlan) throws {
+    /// Both apply and restore revalidate the actual plist layout. A saved byte
+    /// whitelist alone never authorizes an unknown layout or another question.
+    private func validateCachePlan(module: RegionModule, plan: RegionWritePlan, applying: Bool) throws {
         guard plan.file == .mobileGestalt, !plan.scope.byteOffsets.isEmpty else { return }
-        let plist = try RegionPlist.parse(plan.before).root
-        let assessments = RegionCacheMapping.assess(plist: plist, build: build,
-            image: cacheImage(), writeAccess: true, reviews: cacheReviews,
-            productType: productType, systemVersion: cacheSystemVersion)
         let questions = module == .fullJapan ? RegionCacheQuestion.allCases : module.question.map { [$0] } ?? []
-        guard !questions.isEmpty else { throw JapanRegionError.unverifiedCacheSemantics }
-        var offsets: Set<Int> = []
-        guard let after = try RegionPlist.parse(plan.after).root["CacheData"] as? Data else {
-            throw JapanRegionError.missingCacheData
+        let before = try RegionPlist.parse(plan.before).root
+        let after = try RegionPlist.parse(plan.after).root
+        let layout = try RegionCacheMapping.layout(plist: before, build: build, productType: productType, questions: questions)
+        _ = try RegionCacheMapping.layout(plist: after, build: build, productType: productType, questions: questions)
+        let offsets = Set(layout.fields.map { $0.slot * 8 })
+        // Accept existing journals with the older whole-Boolean/validity scope;
+        // canonical Boolean and validity checks above still prevent extra edits.
+        let legacy = Set(layout.fields.flatMap { Array(($0.slot * 8)..<($0.slot * 8 + 8)) + [layout.slotCount * 8 + $0.slot] })
+        guard Set(plan.scope.byteOffsets) == offsets || Set(plan.scope.byteOffsets) == legacy else {
+            throw JapanRegionError.unverifiedCacheSemantics
         }
-        for question in questions {
-            let layout = try RegionCacheMapping.layout(for: question, assessments: assessments,
-                plist: plist, productType: productType)
-            guard layout.isApplied(to: after), let field = layout.fields.first else {
-                throw JapanRegionError.invalidCachePatchLayout
-            }
-            offsets.formUnion(Array((field.slot * 8)..<(field.slot * 8 + 8)) + [layout.slotCount * 8 + field.slot])
+        if applying, let data = after["CacheData"] as? Data, !layout.isApplied(to: data) {
+            throw JapanRegionError.invalidCachePatchLayout
         }
-        guard offsets == Set(plan.scope.byteOffsets) else { throw JapanRegionError.unverifiedCacheSemantics }
     }
 
     private func validateAuthorization(module: RegionModule, file: RegionFile, scope: RegionPatchScope) throws {
@@ -317,7 +360,8 @@ final class RegionTransactionCoordinator {
                     let permitted = Set(targetSlots.flatMap { Array(($0 * 8)..<($0 * 8 + 8)) + [slots * 8 + $0] })
                     authorized = targetSlots.count == (module == .fullJapan ? 3 : 1)
                         && targetSlots.allSatisfy { (0..<slots).contains($0) }
-                        && permitted == Set(scope.byteOffsets) && scope.byteOffsets.count == permitted.count
+                        && (permitted == Set(scope.byteOffsets) || Set(targetSlots.map { $0 * 8 }) == Set(scope.byteOffsets))
+                        && scope.byteOffsets.count == Set(scope.byteOffsets).count
                     if module == .fullJapan {
                         authorized = authorized && scope.extraKeys.count == 3
                             && scope.extraKeys.contains(JapanRegionMutation.regionCodeKey)

@@ -83,7 +83,7 @@ enum JapanRegionError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unverifiedCacheSemantics:
-            "CacheData question-to-slot semantics are unverified. A reviewed CacheUUID/descriptor mapping is required; matching length or OS build is insufficient. Diagnostics remain available."
+            "The cache layout or requested write scope is unsupported. Refresh and check the device, build and CacheUUID."
         case .staleCache:
             "The MobileGestalt cache version does not match the running system. Refusing stale data."
         case .unsupportedProductType(let productType):

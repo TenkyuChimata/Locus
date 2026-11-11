@@ -14,14 +14,23 @@ or are authorized to manage. It is not affiliated with Apple.
 | RegionInfo | Changes exactly one existing region-info key to J/A; ambiguous dual keys are rejected |
 | RegulatoryModelNumber | Uses the existing real-ProductType whitelist for the Japan model |
 | Apple Intelligence capability | Changes a missing or canonical Boolean/integer flag to true/1; restores its original type or absence |
-| green-tea / not-green-tea / wapi | Requires an independently reviewed binary/cache mapping, valid values and file access |
+| green-tea / not-green-tea / wapi | Known device/build/UUID layout, canonical valid Boolean slots, no CacheExtra overrides and file write access |
 | MobileActivation | Requires verified container identity, schema and reviewed storage/consumer semantics; separate refresh in Region |
 | Full Japan Region | Requires every identity, cache-behavior and activation prerequisite; AI is independent |
 | CoreText GB18030 | Separate process-local experiment, requiring a reviewed loaded binary and writable target memory |
 
-The MobileGestalt mapping, MobileActivation and CoreText review registries are
-empty. Their gated actions remain unavailable. Identity and AI actions still
-require valid inputs, backups and actual on-device access. A capability flag does
+CacheData editing currently supports only **iPhone18,3 / iOS 27.2 / 24B119**,
+CacheUUID `48CB1FAC-755B-435F-9A01-A20E5D810EA9`, 6480 bytes (720 slots).
+The device-observed type-11 slots are green-tea 383, not-green-tea 506 and wapi
+694. Targets are false, true and false, respectively. Unknown models, builds,
+UUIDs or lengths are refused. Each option checks its canonical 8-byte Boolean,
+validity=1 and both hashed/plain CacheExtra aliases independently. Only the
+value's first byte may change; validity is never repaired or enabled.
+CacheExtra's field count is metadata, not a layout identifier.
+
+MobileActivation and CoreText review registries remain empty and their actions
+remain unavailable. Identity and AI actions still require valid inputs, backups
+and actual on-device access. A capability flag does
 not establish service availability or successful activation.
 
 ## Reading and diagnostics
@@ -41,8 +50,9 @@ following links. Ordinary reads neither open `/private` separately nor require
 runtime descriptor mapping, hashes, repeated reads or an audit export. A single
 read does not promise a coherent snapshot during a concurrent system update.
 
-Loaded-image inspection remains part of the separate mutation checks; it is not
-a prerequisite for Diagnostics. Diagnostics does not request write access or
+Cache writes use the fixed, device-verified layout above; no loaded-image scan
+or independent audit report is required. Loaded-image helpers remain available
+for the separate native experiments. Diagnostics does not request write access or
 scan MobileActivation containers. Its runtime answers and DeviceTree values are
 independent observations of current process APIs and IORegistry.
 
@@ -50,9 +60,19 @@ independent observations of current process APIs and IORegistry.
 
 Persistent actions use the serialized Region coordinator. It saves original and
 intended bytes, SHA-256 checksums, device/build identity, a fixed write scope and
-a durable journal before writing. Exact current bytes must match before each
+a durable journal before writing. New iOS journals also bind the device's app
+vendor identifier; cached device identifiers, when present, must match on
+restore. Backups remain inside this app's local container; no backup import or
+cross-device restore is offered. Exact current bytes must match before each
 write. Readback verifies results; failures attempt reverse-order rollback and
 report verified recovery or recovery required.
+
+Choose **Review Changes** to reread and validate the cache, view the exact
+before/after values and save verified full backups. Only then does the
+confirmation sheet enable **Apply** (or **Restore**). Cancel closes the prepared
+journal without claiming an original edit. Confirmation reuses the saved bytes;
+any source change since preview is rejected rather than silently replanned.
+Already-matching targets cause no write and no invented original backup.
 
 `Documents/Region Module Backups` holds first-module originals and operation
 journals. Legacy backups are retained. "Original" means before Locus's first
@@ -64,8 +84,10 @@ reinstalling.
 
 The inode-preserving writer uses truncation and in-place writes. Partial content
 can be visible to other readers; neither power-loss atomicity nor cross-file
-atomicity is guaranteed. This read simplification does not relax those write
-gates or remove backups, compare-and-replace, readback or recovery.
+atomicity is guaranteed. `flock` coordinates Locus writers but cannot exclude
+uncooperative system daemons. Readback and fsync do not prove power-loss safety.
+If interrupted bytes match neither original nor intended data, automatic
+recovery refuses a forced overwrite and retains the full backups for recovery.
 
 CoreText changes no system file or page protection and restores its temporary
 cached byte. Glyph-cache reuse can still make its rendering result inconclusive.
@@ -100,7 +122,7 @@ xcodebuild -project Locus.xcodeproj -scheme Locus -configuration Release \
 
 ```sh
 sh Scripts/test-portable.sh    # C sanitizers, Python/project checks; Swift if available
-sh Scripts/test-swift.sh       # planners, mapping write gates, journals, recovery
+sh Scripts/test-swift.sh       # planners, layouts, journals, recovery and synthetic plist disk writes
 sh Scripts/test-macos.sh       # native access/write/image tests and Swift; Apple SDKs
 sh Scripts/check-ios-native.sh # iPhoneOS arm64 source checks; Xcode required
 ```
